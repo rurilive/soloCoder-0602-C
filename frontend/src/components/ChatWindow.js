@@ -89,16 +89,24 @@ export default function ChatWindow({ room, currentUserId }) {
   }, [currentUserId]);
 
   const handleMarkRead = useCallback(async (messageId) => {
-    setMessages(prev => prev.map(m => {
-      if (m.id === messageId) {
-        const existing = m.read_by || [];
-        if (existing.includes(currentUserId)) return m;
-        return { ...m, read_by: [...existing, currentUserId] };
-      }
-      return m;
-    }));
-    await api.markRead(messageId, currentUserId);
-  }, [currentUserId]);
+    const currentMsg = messages.find(m => m.id === messageId);
+    if (!currentMsg) return;
+    if ((currentMsg.read_by || []).includes(currentUserId)) return;
+
+    try {
+      await api.markRead(messageId, currentUserId);
+      setMessages(prev => prev.map(m => {
+        if (m.id === messageId) {
+          const existing = m.read_by || [];
+          if (existing.includes(currentUserId)) return m;
+          return { ...m, read_by: [...existing, currentUserId] };
+        }
+        return m;
+      }));
+    } catch (e) {
+      console.error('Mark read failed:', e);
+    }
+  }, [messages, currentUserId]);
 
   const handleTyping = useCallback((isTyping) => {
     sendTyping(currentUserId, isTyping);
