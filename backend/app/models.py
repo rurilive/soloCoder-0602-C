@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Text, DateTime, Boolean, ForeignKey, Integer
+from sqlalchemy import Column, String, Text, DateTime, Boolean, ForeignKey, Integer, UniqueConstraint
 from sqlalchemy.sql import func
 from .database import Base
 
@@ -28,6 +28,8 @@ class RoomMember(Base):
     room_id = Column(String, ForeignKey("rooms.id"), nullable=False)
     user_id = Column(String, ForeignKey("users.id"), nullable=False)
 
+    __table_args__ = (UniqueConstraint("room_id", "user_id", name="uq_room_member"),)
+
 
 class Message(Base):
     __tablename__ = "messages"
@@ -47,3 +49,5 @@ class ReadReceipt(Base):
     message_id = Column(String, ForeignKey("messages.id"), nullable=False)
     user_id = Column(String, ForeignKey("users.id"), nullable=False)
     read_at = Column(DateTime, server_default=func.now())
+
+    __table_args__ = (UniqueConstraint("message_id", "user_id", name="uq_read_receipt"),)

@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func
 from datetime import datetime, timedelta, timezone
 import uuid
 
@@ -36,10 +36,33 @@ async def list_users(db: AsyncSession = Depends(get_db)):
 
 @router.post("/rooms", response_model=RoomOut)
 async def create_room(body: RoomCreate, db: AsyncSession = Depends(get_db)):
+    member_ids = sorted(list(set(body.member_ids)))
+
+    if not body.is_group and len(member_ids) == 2:
+        room_result = await db.execute(
+            select(RoomMember.room_id)
+            .where(RoomMember.user_id.in_(member_ids))
+            .group_by(RoomMember.room_id)
+            .having(func.count(RoomMember.user_id) == len(member_ids))
+        )
+        for room_id in room_result.scalars().all():
+            rm_check = await db.execute(
+                select(func.count()).select_from(RoomMember).where(RoomMember.room_id == room_id)
+            )
+            if rm_check.scalar_one() == len(member_ids):
+                r = await db.execute(select(Room).where(Room.id == room_id))
+                existing_room = r.scalar_one_or_none()
+                if existing_room and not existing_room.is_group:
+                    members_result = await db.execute(
+                        select(User).join(RoomMember, RoomMember.user_id == User.id).where(RoomMember.room_id == room_id)
+                    )
+                    members = members_result.scalars().all()
+                    return RoomOut(id=existing_room.id, name=existing_room.name, is_group=existing_room.is_group, members=members)
+
     room_id = str(uuid.uuid4())
     room = Room(id=room_id, name=body.name, is_group=body.is_group)
     db.add(room)
-    for uid in body.member_ids:
+    for uid in member_ids:
         db.add(RoomMember(room_id=room_id, user_id=uid))
     await db.commit()
     await db.refresh(room)

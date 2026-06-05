@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import MessageList from './MessageList';
 import MessageInput from './MessageInput';
 import TypingIndicator from './TypingIndicator';
@@ -9,19 +9,40 @@ import './ChatWindow.css';
 export default function ChatWindow({ room, currentUserId }) {
   const [messages, setMessages] = useState([]);
   const [typingUsers, setTypingUsers] = useState([]);
-  const [loaded, setLoaded] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const abortRef = useRef(null);
 
-  const loadMessages = useCallback(async () => {
-    try {
-      const msgs = await api.listMessages(room.id);
-      setMessages(msgs);
-      setLoaded(true);
-    } catch (e) {
-      console.error('Failed to load messages', e);
-    }
+  useEffect(() => {
+    setMessages([]);
+    setTypingUsers([]);
+    setLoading(true);
+
+    if (abortRef.current) abortRef.current.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const msgs = await api.listMessages(room.id, controller.signal);
+        if (!cancelled && !controller.signal.aborted) {
+          setMessages(msgs);
+        }
+      } catch (e) {
+        if (e.name !== 'AbortError') {
+          console.error('Failed to load messages', e);
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
   }, [room.id]);
-
-  if (!loaded) loadMessages();
 
   const handleWSMessage = useCallback((data) => {
     if (data.type === 'new_message') {
@@ -34,11 +55,14 @@ export default function ChatWindow({ room, currentUserId }) {
         m.id === data.payload.message_id ? { ...m, is_recalled: true } : m
       ));
     } else if (data.type === 'read_receipt') {
-      setMessages(prev => prev.map(m =>
-        m.id === data.payload.message_id
-          ? { ...m, read_by: [...(m.read_by || []), data.payload.user_id] }
-          : m
-      ));
+      setMessages(prev => prev.map(m => {
+        if (m.id === data.payload.message_id) {
+          const existing = m.read_by || [];
+          if (existing.includes(data.payload.user_id)) return m;
+          return { ...m, read_by: [...existing, data.payload.user_id] };
+        }
+        return m;
+      }));
     } else if (data.type === 'typing') {
       setTypingUsers(prev => {
         const filtered = prev.filter(u => u.user_id !== data.payload.user_id);
@@ -65,6 +89,14 @@ export default function ChatWindow({ room, currentUserId }) {
   }, [currentUserId]);
 
   const handleMarkRead = useCallback(async (messageId) => {
+    setMessages(prev => prev.map(m => {
+      if (m.id === messageId) {
+        const existing = m.read_by || [];
+        if (existing.includes(currentUserId)) return m;
+        return { ...m, read_by: [...existing, currentUserId] };
+      }
+      return m;
+    }));
     await api.markRead(messageId, currentUserId);
   }, [currentUserId]);
 
@@ -86,7 +118,7 @@ export default function ChatWindow({ room, currentUserId }) {
         onRecall={handleRecall}
         onMarkRead={handleMarkRead}
       />
-      <TypingIndicator typingUsers={typingUsers} currentUserId={currentUserId} />
+      <TypingIndicator typingUsers={typingUsers} currentUserId={currentUserId} isGroup={room.is_group} />
       <MessageInput onSend={handleSend} onTyping={handleTyping} />
     </div>
   );

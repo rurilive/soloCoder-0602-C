@@ -1,7 +1,8 @@
 import React from 'react';
 import './TypingIndicator.css';
 
-export default function TypingIndicator({ typingUsers, currentUserId }) {
+export default function TypingIndicator({ typingUsers, currentUserId, isGroup }) {
+  if (!isGroup) return null;
   const others = typingUsers.filter(u => u.user_id !== currentUserId);
   if (others.length === 0) return null;
 
