@@ -26,7 +26,8 @@ export const api = {
   sendMessage: (roomId, senderId, content) =>
     request('/messages', { method: 'POST', body: JSON.stringify({ room_id: roomId, sender_id: senderId, content }) }),
 
-  listMessages: (roomId, signal) => request(`/messages/${roomId}`, { signal }),
+  listMessages: (roomId, signal, limit = 50, offset = 0) =>
+    request(`/messages/${roomId}?limit=${limit}&offset=${offset}`, { signal }),
 
   recallMessage: (messageId, userId) =>
     request(`/messages/${messageId}/recall?user_id=${userId}`, { method: 'PUT' }),

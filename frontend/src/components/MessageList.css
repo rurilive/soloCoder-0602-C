@@ -90,3 +90,10 @@
   opacity: 0.5;
   font-size: 13px;
 }
+
+.loading-more {
+  text-align: center;
+  padding: 12px;
+  font-size: 12px;
+  color: #999;
+}

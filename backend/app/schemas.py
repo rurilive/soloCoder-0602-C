@@ -60,6 +60,13 @@ class TypingPayload(BaseModel):
     is_typing: bool
 
 
+class MessageListResponse(BaseModel):
+    total: int
+    limit: int
+    offset: int
+    items: list[MessageOut]
+
+
 class WSMessage(BaseModel):
     type: str
     payload: dict

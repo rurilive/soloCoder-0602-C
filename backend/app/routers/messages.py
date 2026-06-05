@@ -9,6 +9,7 @@ from ..models import User, Room, RoomMember, Message, ReadReceipt
 from ..schemas import (
     UserCreate, UserOut, RoomCreate, RoomOut,
     MessageCreate, MessageOut, ReadReceiptCreate,
+    MessageListResponse,
 )
 from ..config import RECALL_WINDOW_SECONDS
 from ..services.connection_manager import manager
@@ -39,6 +40,12 @@ async def create_room(body: RoomCreate, db: AsyncSession = Depends(get_db)):
     member_ids = sorted(list(set(body.member_ids)))
     if len(member_ids) < 2:
         raise HTTPException(400, "At least 2 members are required to create a room")
+
+    users_result = await db.execute(select(User.id).where(User.id.in_(member_ids)))
+    existing_user_ids = {uid for uid in users_result.scalars().all()}
+    missing_user_ids = [uid for uid in member_ids if uid not in existing_user_ids]
+    if missing_user_ids:
+        raise HTTPException(400, f"Users not found: {', '.join(missing_user_ids)}")
 
     room_result = await db.execute(
         select(RoomMember.room_id)
@@ -127,10 +134,31 @@ async def send_message(body: MessageCreate, db: AsyncSession = Depends(get_db)):
     )
 
 
-@router.get("/messages/{room_id}", response_model=list[MessageOut])
-async def list_messages(room_id: str, db: AsyncSession = Depends(get_db)):
+@router.get("/messages/{room_id}", response_model=MessageListResponse)
+async def list_messages(
+    room_id: str,
+    limit: int = 50,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+):
+    if limit < 1:
+        limit = 50
+    if limit > 200:
+        limit = 200
+    if offset < 0:
+        offset = 0
+
+    count_result = await db.execute(
+        select(func.count()).select_from(Message).where(Message.room_id == room_id)
+    )
+    total = count_result.scalar_one()
+
     result = await db.execute(
-        select(Message).where(Message.room_id == room_id).order_by(Message.created_at)
+        select(Message)
+        .where(Message.room_id == room_id)
+        .order_by(Message.created_at)
+        .limit(limit)
+        .offset(offset)
     )
     messages = result.scalars().all()
     out = []
@@ -142,7 +170,7 @@ async def list_messages(room_id: str, db: AsyncSession = Depends(get_db)):
             content=m.content, is_recalled=m.is_recalled,
             created_at=m.created_at, read_by=read_by,
         ))
-    return out
+    return MessageListResponse(total=total, limit=limit, offset=offset, items=out)
 
 
 @router.put("/messages/{message_id}/recall")

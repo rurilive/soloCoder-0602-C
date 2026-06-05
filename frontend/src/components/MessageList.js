@@ -1,12 +1,22 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useCallback } from 'react';
 import './MessageList.css';
 
-export default function MessageList({ messages, currentUserId, onRecall, onMarkRead }) {
+export default function MessageList({ messages, currentUserId, onRecall, onMarkRead, onLoadMore, hasMore, loadingMore }) {
   const bottomRef = useRef(null);
+  const topRef = useRef(null);
+  const listRef = useRef(null);
+  const initialScrollDone = useRef(false);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (!initialScrollDone.current && messages.length > 0) {
+      bottomRef.current?.scrollIntoView({ behavior: 'auto' });
+      initialScrollDone.current = true;
+    }
   }, [messages]);
+
+  useEffect(() => {
+    initialScrollDone.current = false;
+  }, [messages.length === 0]);
 
   useEffect(() => {
     const unread = messages.filter(
@@ -15,6 +25,14 @@ export default function MessageList({ messages, currentUserId, onRecall, onMarkR
     unread.forEach(m => onMarkRead(m.id));
   }, [messages, currentUserId, onMarkRead]);
 
+  const handleScroll = useCallback(() => {
+    if (!listRef.current || !onLoadMore || loadingMore || !hasMore) return;
+    const { scrollTop } = listRef.current;
+    if (scrollTop <= 50) {
+      onLoadMore();
+    }
+  }, [onLoadMore, loadingMore, hasMore]);
+
   const canRecall = (msg) => {
     if (msg.sender_id !== currentUserId || msg.is_recalled) return false;
     const created = new Date(msg.created_at);
@@ -22,7 +40,11 @@ export default function MessageList({ messages, currentUserId, onRecall, onMarkR
   };
 
   return (
-    <div className="message-list">
+    <div className="message-list" ref={listRef} onScroll={handleScroll}>
+      <div ref={topRef} />
+      {loadingMore && (
+        <div className="loading-more">加载中...</div>
+      )}
       {messages.map(msg => (
         <div key={msg.id} className={`message-row ${msg.sender_id === currentUserId ? 'mine' : 'other'}`}>
           <div className="message-bubble">
