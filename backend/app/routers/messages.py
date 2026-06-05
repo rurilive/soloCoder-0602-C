@@ -37,6 +37,8 @@ async def list_users(db: AsyncSession = Depends(get_db)):
 @router.post("/rooms", response_model=RoomOut)
 async def create_room(body: RoomCreate, db: AsyncSession = Depends(get_db)):
     member_ids = sorted(list(set(body.member_ids)))
+    if len(member_ids) < 2:
+        raise HTTPException(400, "At least 2 members are required to create a room")
 
     room_result = await db.execute(
         select(RoomMember.room_id)

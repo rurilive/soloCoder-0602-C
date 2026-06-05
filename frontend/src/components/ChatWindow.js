@@ -11,6 +11,11 @@ export default function ChatWindow({ room, currentUserId }) {
   const [typingUsers, setTypingUsers] = useState([]);
   const [loading, setLoading] = useState(false);
   const abortRef = useRef(null);
+  const messagesRef = useRef([]);
+
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
 
   useEffect(() => {
     setMessages([]);
@@ -89,15 +94,8 @@ export default function ChatWindow({ room, currentUserId }) {
   }, [currentUserId]);
 
   const handleMarkRead = useCallback(async (messageId) => {
-    let shouldCall = false;
-    setMessages(prev => {
-      const target = prev.find(m => m.id === messageId);
-      if (target && !(target.read_by || []).includes(currentUserId)) {
-        shouldCall = true;
-      }
-      return prev;
-    });
-    if (!shouldCall) return;
+    const target = messagesRef.current.find(m => m.id === messageId);
+    if (!target || (target.read_by || []).includes(currentUserId)) return;
 
     try {
       await api.markRead(messageId, currentUserId);
