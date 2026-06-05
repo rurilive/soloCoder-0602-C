@@ -89,9 +89,15 @@ export default function ChatWindow({ room, currentUserId }) {
   }, [currentUserId]);
 
   const handleMarkRead = useCallback(async (messageId) => {
-    const currentMsg = messages.find(m => m.id === messageId);
-    if (!currentMsg) return;
-    if ((currentMsg.read_by || []).includes(currentUserId)) return;
+    let shouldCall = false;
+    setMessages(prev => {
+      const target = prev.find(m => m.id === messageId);
+      if (target && !(target.read_by || []).includes(currentUserId)) {
+        shouldCall = true;
+      }
+      return prev;
+    });
+    if (!shouldCall) return;
 
     try {
       await api.markRead(messageId, currentUserId);
@@ -106,7 +112,7 @@ export default function ChatWindow({ room, currentUserId }) {
     } catch (e) {
       console.error('Mark read failed:', e);
     }
-  }, [messages, currentUserId]);
+  }, [currentUserId]);
 
   const handleTyping = useCallback((isTyping) => {
     sendTyping(currentUserId, isTyping);

@@ -54,7 +54,9 @@ async def create_room(body: RoomCreate, db: AsyncSession = Depends(get_db)):
             existing_room = r.scalar_one_or_none()
             if existing_room and existing_room.is_group == body.is_group:
                 if body.is_group:
-                    if existing_room.name != body.name:
+                    name_match = (existing_room.name is None and body.name is None) or \
+                                 (existing_room.name is not None and body.name is not None and existing_room.name == body.name)
+                    if not name_match:
                         continue
                 members_result = await db.execute(
                     select(User).join(RoomMember, RoomMember.user_id == User.id).where(RoomMember.room_id == room_id)
