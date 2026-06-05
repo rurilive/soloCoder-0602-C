@@ -1,0 +1,14 @@
+[project]
+name = "chat-backend"
+version = "1.0.0"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.6",
+    "pydantic>=2.10",
+    "python-multipart>=0.0.12",
+    "websockets>=13.1",
+    "aiosqlite>=0.20.0",
+    "sqlalchemy[asyncio]>=2.0.35",
+    "greenlet>=3.0.0",
+]
