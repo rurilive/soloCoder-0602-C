@@ -63,7 +63,8 @@ export default function ChatWindow({ room, currentUserId }) {
   }, [room.id]);
 
   const handleLoadMore = useCallback(async () => {
-    if (loadingMore || loadedHistoryCount.current >= totalRef.current) return;
+    if (loadingMore) return;
+    if (loadedHistoryCount.current >= totalRef.current) return;
 
     const scrollContainer = listRef.current;
     const prevScrollHeight = scrollContainer ? scrollContainer.scrollHeight : 0;
@@ -73,15 +74,19 @@ export default function ChatWindow({ room, currentUserId }) {
     try {
       const offset = loadedHistoryCount.current;
       const response = await api.listMessages(room.id, undefined, PAGE_SIZE, offset);
-      const olderMessages = [...response.items].reverse();
 
-      setMessages(prev => {
-        const existingIds = new Set(prev.map(m => m.id));
-        const newItems = olderMessages.filter(m => !existingIds.has(m.id));
+      const olderMessages = [...response.items].reverse();
+      const existingIds = new Set(messagesRef.current.map(m => m.id));
+      const newItems = olderMessages.filter(m => !existingIds.has(m.id));
+
+      if (newItems.length > 0) {
+        setMessages(prev => [...newItems, ...prev]);
         loadedHistoryCount.current += newItems.length;
-        return [...newItems, ...prev];
-      });
-      setTotal(response.total);
+      }
+
+      if (response.total !== totalRef.current) {
+        setTotal(response.total);
+      }
 
       requestAnimationFrame(() => {
         if (scrollContainer) {
