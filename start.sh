@@ -16,19 +16,35 @@ cleanup_pids() {
     rm -f "$FRONTEND_PID_FILE"
 }
 
+find_child_pid() {
+    local PARENT_PID=$1
+    local PROCESS_NAME=$2
+    local COUNT=0
+    while [ $COUNT -lt 20 ]; do
+        local CHILD=$(ps --ppid "$PARENT_PID" -o pid=,comm= 2>/dev/null | grep -i "$PROCESS_NAME" | awk '{print $1}' | head -1)
+        if [ -n "$CHILD" ]; then
+            echo "$CHILD"
+            return 0
+        fi
+        sleep 0.2
+        COUNT=$((COUNT + 1))
+    done
+    echo ""
+}
+
 cleanup() {
     echo ""
     echo "🛑 正在停止服务..."
     if [ -f "$BACKEND_PID_FILE" ]; then
         BACKEND_PID=$(cat "$BACKEND_PID_FILE")
         if kill -0 "$BACKEND_PID" 2>/dev/null; then
-            kill "$BACKEND_PID" 2>/dev/null || true
+            kill -- -$(ps -o pgid= "$BACKEND_PID" 2>/dev/null | tr -d ' ') 2>/dev/null || kill "$BACKEND_PID" 2>/dev/null || true
         fi
     fi
     if [ -f "$FRONTEND_PID_FILE" ]; then
         FRONTEND_PID=$(cat "$FRONTEND_PID_FILE")
         if kill -0 "$FRONTEND_PID" 2>/dev/null; then
-            kill "$FRONTEND_PID" 2>/dev/null || true
+            kill -- -$(ps -o pgid= "$FRONTEND_PID" 2>/dev/null | tr -d ' ') 2>/dev/null || kill "$FRONTEND_PID" 2>/dev/null || true
         fi
     fi
     cleanup_pids
@@ -110,14 +126,26 @@ echo "按 Ctrl+C 停止所有服务，或运行 ./stop.sh"
 echo ""
 
 cd "$SCRIPT_DIR/backend"
-uv run python -m app.main &
-BACKEND_PID=$!
+setsid uv run python -m app.main > /dev/null 2>&1 &
+UV_PID=$!
+echo "⏳ 等待后端 Python 进程启动..."
+BACKEND_PID=$(find_child_pid "$UV_PID" "python")
+if [ -z "$BACKEND_PID" ]; then
+    echo "⚠️  未找到 Python 子进程，使用 UV 进程 PID"
+    BACKEND_PID=$UV_PID
+fi
 echo "$BACKEND_PID" > "$BACKEND_PID_FILE"
 echo "✅ 后端已启动 (PID: $BACKEND_PID)"
 
 cd "$SCRIPT_DIR/frontend"
-npm run dev &
-FRONTEND_PID=$!
+setsid npm run dev > /dev/null 2>&1 &
+NPM_PID=$!
+echo "⏳ 等待前端 Node 进程启动..."
+FRONTEND_PID=$(find_child_pid "$NPM_PID" "node")
+if [ -z "$FRONTEND_PID" ]; then
+    echo "⚠️  未找到 Node 子进程，使用 npm 进程 PID"
+    FRONTEND_PID=$NPM_PID
+fi
 echo "$FRONTEND_PID" > "$FRONTEND_PID_FILE"
 echo "✅ 前端已启动 (PID: $FRONTEND_PID)"
 
