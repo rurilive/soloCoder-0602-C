@@ -6,7 +6,7 @@ from sqlalchemy import event
 
 from app.main import app
 from app.database import Base, get_db
-from app.models import User, Room, RoomMember, Message, ReadReceipt
+from app.models import User, Room, RoomMember, Message, ReadReceipt, UserRole
 
 
 TEST_DATABASE_URL = "sqlite+aiosqlite:///./test_chat.db"
@@ -67,9 +67,10 @@ async def client(test_session):
 @pytest_asyncio.fixture
 async def test_users(test_session):
     users = [
-        User(id="user1", username="Alice", avatar="avatar1.png"),
-        User(id="user2", username="Bob", avatar="avatar2.png"),
-        User(id="user3", username="Charlie", avatar="avatar3.png"),
+        User(id="user1", username="Alice", avatar="avatar1.png", role=UserRole.USER.value),
+        User(id="user2", username="Bob", avatar="avatar2.png", role=UserRole.USER.value),
+        User(id="user3", username="Charlie", avatar="avatar3.png", role=UserRole.USER.value),
+        User(id="admin1", username="Admin", avatar="admin.png", role=UserRole.ADMIN.value),
     ]
     test_session.add_all(users)
     await test_session.commit()

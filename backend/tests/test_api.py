@@ -150,7 +150,10 @@ async def test_recall_message_success(client, test_users):
     )
     msg_id = msg_resp.json()["id"]
 
-    response = await client.put(f"/api/messages/{msg_id}/recall?user_id=user1")
+    response = await client.put(
+        f"/api/messages/{msg_id}/recall",
+        headers={"X-User-ID": "user1"},
+    )
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
 
@@ -178,14 +181,66 @@ async def test_recall_message_not_owner(client, test_users):
     )
     msg_id = msg_resp.json()["id"]
 
-    response = await client.put(f"/api/messages/{msg_id}/recall?user_id=user2")
+    response = await client.put(
+        f"/api/messages/{msg_id}/recall",
+        headers={"X-User-ID": "user2"},
+    )
     assert response.status_code == 403
 
 
 @pytest.mark.asyncio
 async def test_recall_message_not_found(client, test_users):
-    response = await client.put("/api/messages/nonexistent/recall?user_id=user1")
+    response = await client.put(
+        "/api/messages/nonexistent/recall",
+        headers={"X-User-ID": "user1"},
+    )
     assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_recall_message_no_auth(client, test_users):
+    response = await client.put("/api/messages/nonexistent/recall")
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_recall_message_invalid_auth(client, test_users):
+    response = await client.put(
+        "/api/messages/nonexistent/recall",
+        headers={"X-User-ID": "nonexistent_user"},
+    )
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_admin_recall_others_message(client, test_users):
+    room_resp = await client.post(
+        "/api/rooms",
+        json={"member_ids": ["user1", "user2"], "is_group": False},
+    )
+    room_id = room_resp.json()["id"]
+
+    msg_resp = await client.post(
+        "/api/messages",
+        json={
+            "room_id": room_id,
+            "sender_id": "user1",
+            "content": "Admin can recall this",
+        },
+    )
+    msg_id = msg_resp.json()["id"]
+
+    response = await client.put(
+        f"/api/messages/{msg_id}/recall",
+        headers={"X-User-ID": "admin1"},
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+
+    msgs_resp = await client.get(f"/api/messages/{room_id}")
+    msgs = msgs_resp.json()["items"]
+    recalled_msg = next(m for m in msgs if m["id"] == msg_id)
+    assert recalled_msg["is_recalled"] is True
 
 
 @pytest.mark.asyncio

@@ -1,18 +1,26 @@
 from pydantic import BaseModel
 from datetime import datetime
 from typing import Optional
+import enum
+
+
+class UserRole(str, enum.Enum):
+    USER = "user"
+    ADMIN = "admin"
 
 
 class UserCreate(BaseModel):
     id: str
     username: str
     avatar: Optional[str] = None
+    role: Optional[UserRole] = UserRole.USER
 
 
 class UserOut(BaseModel):
     id: str
     username: str
     avatar: Optional[str] = None
+    role: UserRole
 
     model_config = {"from_attributes": True}
 

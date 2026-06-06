@@ -1,6 +1,12 @@
 from sqlalchemy import Column, String, Text, DateTime, Boolean, ForeignKey, Integer, UniqueConstraint
 from sqlalchemy.sql import func
+import enum
 from .database import Base
+
+
+class UserRole(str, enum.Enum):
+    USER = "user"
+    ADMIN = "admin"
 
 
 class User(Base):
@@ -9,6 +15,7 @@ class User(Base):
     id = Column(String, primary_key=True)
     username = Column(String, unique=True, nullable=False)
     avatar = Column(String, nullable=True)
+    role = Column(String, default=UserRole.USER.value, nullable=False)
     created_at = Column(DateTime, server_default=func.now())
 
 

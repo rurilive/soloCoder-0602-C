@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import uuid
 
 from ..database import get_db
-from ..models import User, Room, RoomMember, Message, ReadReceipt
+from ..models import User, Room, RoomMember, Message, ReadReceipt, UserRole
 from ..schemas import (
     UserCreate, UserOut, RoomCreate, RoomOut,
     MessageCreate, MessageOut, ReadReceiptCreate,
@@ -13,6 +13,7 @@ from ..schemas import (
 )
 from ..config import RECALL_WINDOW_SECONDS
 from ..services.connection_manager import manager
+from ..auth import get_current_user
 
 router = APIRouter(prefix="/api", tags=["chat"])
 
@@ -22,7 +23,12 @@ async def create_user(body: UserCreate, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(User).where(User.id == body.id))
     if result.scalar_one_or_none():
         raise HTTPException(400, "User already exists")
-    user = User(id=body.id, username=body.username, avatar=body.avatar)
+    user = User(
+        id=body.id,
+        username=body.username,
+        avatar=body.avatar,
+        role=body.role.value if body.role else UserRole.USER.value,
+    )
     db.add(user)
     await db.commit()
     await db.refresh(user)
@@ -174,20 +180,30 @@ async def list_messages(
 
 
 @router.put("/messages/{message_id}/recall")
-async def recall_message(message_id: str, user_id: str, db: AsyncSession = Depends(get_db)):
+async def recall_message(
+    message_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     result = await db.execute(select(Message).where(Message.id == message_id))
     msg = result.scalar_one_or_none()
     if not msg:
         raise HTTPException(404, "Message not found")
-    if msg.sender_id != user_id:
+
+    is_admin = current_user.role == UserRole.ADMIN.value
+
+    if not is_admin and msg.sender_id != current_user.id:
         raise HTTPException(403, "Cannot recall others' messages")
-    now = datetime.now(timezone.utc)
-    if msg.created_at.tzinfo is None:
-        msg_time = msg.created_at.replace(tzinfo=timezone.utc)
-    else:
-        msg_time = msg.created_at
-    if now - msg_time > timedelta(seconds=RECALL_WINDOW_SECONDS):
-        raise HTTPException(400, "Recall window expired (2 minutes)")
+
+    if not is_admin:
+        now = datetime.now(timezone.utc)
+        if msg.created_at.tzinfo is None:
+            msg_time = msg.created_at.replace(tzinfo=timezone.utc)
+        else:
+            msg_time = msg.created_at
+        if now - msg_time > timedelta(seconds=RECALL_WINDOW_SECONDS):
+            raise HTTPException(400, "Recall window expired (2 minutes)")
+
     msg.is_recalled = True
     await db.commit()
 
