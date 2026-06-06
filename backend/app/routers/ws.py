@@ -43,7 +43,12 @@ async def ws_endpoint(
     last_event_id = ws.query_params.get("last_event_id")
 
     if last_event_id:
-        await db.execute(select(Message).where(Message.id == last_event_id))
+        msg_result = await db.execute(
+            select(Message).where(Message.id == last_event_id)
+        )
+        last_msg = msg_result.scalar_one_or_none()
+        if not last_msg or last_msg.room_id != room_id:
+            last_event_id = None
 
     await manager.connect(room_id, ws)
 
