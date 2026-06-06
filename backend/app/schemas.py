@@ -78,3 +78,12 @@ class MessageListResponse(BaseModel):
 class WSMessage(BaseModel):
     type: str
     payload: dict
+
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+
+class LoginRequest(BaseModel):
+    user_id: str

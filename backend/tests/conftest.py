@@ -77,3 +77,12 @@ async def test_users(test_session):
     for u in users:
         await test_session.refresh(u)
     return users
+
+
+async def get_token(client, user_id: str) -> str:
+    resp = await client.post("/api/login", json={"user_id": user_id})
+    return resp.json()["access_token"]
+
+
+def auth_headers(token: str) -> dict:
+    return {"Authorization": f"Bearer {token}"}

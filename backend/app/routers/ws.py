@@ -1,12 +1,45 @@
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
+import jwt
+from jwt.exceptions import InvalidTokenError, DecodeError
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+
 from ..services.connection_manager import manager
+from ..config import SECRET_KEY, ALGORITHM
+from ..database import get_db
+from ..models import User
 
 router = APIRouter(tags=["websocket"])
 
 
+async def get_ws_user(ws: WebSocket, db: AsyncSession = Depends(get_db)) -> User | None:
+    token = ws.query_params.get("token")
+    if not token:
+        return None
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id: str = payload.get("sub")
+        if user_id is None:
+            return None
+    except (InvalidTokenError, DecodeError):
+        return None
+
+    result = await db.execute(select(User).where(User.id == user_id))
+    return result.scalar_one_or_none()
+
+
 @router.websocket("/ws/{room_id}")
-async def ws_endpoint(ws: WebSocket, room_id: str):
-    user_id = ws.query_params.get("user_id", "unknown")
+async def ws_endpoint(
+    ws: WebSocket,
+    room_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    user = await get_ws_user(ws, db)
+    if not user:
+        await ws.close(code=1008, reason="Unauthorized")
+        return
+
+    user_id = user.id
     await manager.connect(room_id, ws)
 
     await manager.broadcast(room_id, {

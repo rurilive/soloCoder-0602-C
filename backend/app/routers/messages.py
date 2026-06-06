@@ -9,13 +9,23 @@ from ..models import User, Room, RoomMember, Message, ReadReceipt, UserRole
 from ..schemas import (
     UserCreate, UserOut, RoomCreate, RoomOut,
     MessageCreate, MessageOut, ReadReceiptCreate,
-    MessageListResponse,
+    MessageListResponse, Token, LoginRequest,
 )
 from ..config import RECALL_WINDOW_SECONDS
 from ..services.connection_manager import manager
-from ..auth import get_current_user
+from ..auth import get_current_user, create_access_token
 
 router = APIRouter(prefix="/api", tags=["chat"])
+
+
+@router.post("/login", response_model=Token)
+async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(User).where(User.id == body.user_id))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid user ID")
+    access_token = create_access_token(data={"sub": user.id})
+    return Token(access_token=access_token, token_type="bearer")
 
 
 @router.post("/users", response_model=UserOut)
@@ -36,13 +46,20 @@ async def create_user(body: UserCreate, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/users", response_model=list[UserOut])
-async def list_users(db: AsyncSession = Depends(get_db)):
+async def list_users(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     result = await db.execute(select(User))
     return result.scalars().all()
 
 
 @router.post("/rooms", response_model=RoomOut)
-async def create_room(body: RoomCreate, db: AsyncSession = Depends(get_db)):
+async def create_room(
+    body: RoomCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     member_ids = sorted(list(set(body.member_ids)))
     if len(member_ids) < 2:
         raise HTTPException(400, "At least 2 members are required to create a room")
@@ -95,7 +112,13 @@ async def create_room(body: RoomCreate, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/rooms/{user_id}", response_model=list[RoomOut])
-async def list_rooms(user_id: str, db: AsyncSession = Depends(get_db)):
+async def list_rooms(
+    user_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if current_user.id != user_id and current_user.role != UserRole.ADMIN.value:
+        raise HTTPException(403, "Cannot list rooms for other users")
     result = await db.execute(
         select(RoomMember.room_id).where(RoomMember.user_id == user_id)
     )
@@ -113,7 +136,13 @@ async def list_rooms(user_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/messages", response_model=MessageOut)
-async def send_message(body: MessageCreate, db: AsyncSession = Depends(get_db)):
+async def send_message(
+    body: MessageCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if body.sender_id != current_user.id and current_user.role != UserRole.ADMIN.value:
+        raise HTTPException(403, "Cannot send messages as another user")
     msg_id = str(uuid.uuid4())
     msg = Message(id=msg_id, room_id=body.room_id, sender_id=body.sender_id, content=body.content)
     db.add(msg)
@@ -145,8 +174,18 @@ async def list_messages(
     room_id: str,
     limit: int = 50,
     offset: int = 0,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    if current_user.role != UserRole.ADMIN.value:
+        member_result = await db.execute(
+            select(RoomMember).where(
+                RoomMember.room_id == room_id,
+                RoomMember.user_id == current_user.id,
+            )
+        )
+        if not member_result.scalar_one_or_none():
+            raise HTTPException(403, "Not a member of this room")
     if limit < 1:
         limit = 50
     if limit > 200:
@@ -216,7 +255,13 @@ async def recall_message(
 
 
 @router.post("/messages/read")
-async def mark_read(body: ReadReceiptCreate, db: AsyncSession = Depends(get_db)):
+async def mark_read(
+    body: ReadReceiptCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if body.user_id != current_user.id and current_user.role != UserRole.ADMIN.value:
+        raise HTTPException(403, "Cannot mark messages as read for other users")
     result = await db.execute(
         select(ReadReceipt).where(
             ReadReceipt.message_id == body.message_id,
