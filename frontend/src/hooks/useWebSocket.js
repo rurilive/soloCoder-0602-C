@@ -12,11 +12,11 @@ export function useWebSocket(roomId, userId, onMessage) {
     if (!roomId || !lastEventIdRef.current) return;
     try {
       const limit = 200;
-      let offset = 0;
+      let currentSinceId = lastEventIdRef.current;
       let hasMore = true;
 
       while (hasMore) {
-        const response = await api.listMessages(roomId, undefined, limit, offset, lastEventIdRef.current);
+        const response = await api.listMessages(roomId, undefined, limit, 0, currentSinceId);
         const messages = [...response.items].reverse();
 
         if (messages.length === 0) break;
@@ -29,8 +29,8 @@ export function useWebSocket(roomId, userId, onMessage) {
           lastEventIdRef.current = msg.id;
         });
 
-        offset += messages.length;
-        hasMore = offset < response.total;
+        currentSinceId = lastEventIdRef.current;
+        hasMore = response.total > limit;
       }
     } catch (e) {
       console.error('Failed to fetch missing messages after reconnect', e);
