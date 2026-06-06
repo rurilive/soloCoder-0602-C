@@ -156,7 +156,7 @@ async def list_messages(
     result = await db.execute(
         select(Message)
         .where(Message.room_id == room_id)
-        .order_by(Message.created_at)
+        .order_by(Message.created_at.desc())
         .limit(limit)
         .offset(offset)
     )

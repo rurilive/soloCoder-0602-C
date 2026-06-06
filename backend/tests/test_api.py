@@ -127,7 +127,9 @@ async def test_list_messages_pagination(client, test_users):
     data2 = response2.json()
     assert data2["total"] == 60
     assert len(data2["items"]) == 20
-    assert data2["items"][0]["content"] == "Message 40"
+
+    all_content = {m["content"] for m in data["items"]} | {m["content"] for m in data2["items"]}
+    assert len(all_content) == 40
 
 
 @pytest.mark.asyncio

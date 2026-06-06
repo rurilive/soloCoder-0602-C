@@ -1,11 +1,17 @@
-import React, { useEffect, useRef, useCallback } from 'react';
+import React, { useEffect, useRef, useCallback, forwardRef } from 'react';
 import './MessageList.css';
 
-export default function MessageList({ messages, currentUserId, onRecall, onMarkRead, onLoadMore, hasMore, loadingMore }) {
+const MessageList = forwardRef(function MessageList(
+  { messages, currentUserId, onRecall, onMarkRead, onLoadMore, hasMore, loadingMore },
+  ref
+) {
   const bottomRef = useRef(null);
   const topRef = useRef(null);
-  const listRef = useRef(null);
+  const innerRef = useRef(null);
   const initialScrollDone = useRef(false);
+  const processedReadIds = useRef(new Set());
+
+  const listRef = ref || innerRef;
 
   useEffect(() => {
     if (!initialScrollDone.current && messages.length > 0) {
@@ -16,22 +22,31 @@ export default function MessageList({ messages, currentUserId, onRecall, onMarkR
 
   useEffect(() => {
     initialScrollDone.current = false;
+    processedReadIds.current.clear();
   }, [messages.length === 0]);
 
   useEffect(() => {
     const unread = messages.filter(
-      m => m.sender_id !== currentUserId && !m.read_by?.includes(currentUserId) && !m.is_recalled
+      m =>
+        m.sender_id !== currentUserId &&
+        !m.read_by?.includes(currentUserId) &&
+        !m.is_recalled &&
+        !processedReadIds.current.has(m.id)
     );
-    unread.forEach(m => onMarkRead(m.id));
+    unread.forEach(m => {
+      processedReadIds.current.add(m.id);
+      onMarkRead(m.id);
+    });
   }, [messages, currentUserId, onMarkRead]);
 
   const handleScroll = useCallback(() => {
-    if (!listRef.current || !onLoadMore || loadingMore || !hasMore) return;
-    const { scrollTop } = listRef.current;
+    const el = typeof listRef === 'object' && listRef !== null ? listRef.current : null;
+    if (!el || !onLoadMore || loadingMore || !hasMore) return;
+    const { scrollTop } = el;
     if (scrollTop <= 50) {
       onLoadMore();
     }
-  }, [onLoadMore, loadingMore, hasMore]);
+  }, [onLoadMore, loadingMore, hasMore, listRef]);
 
   const canRecall = (msg) => {
     if (msg.sender_id !== currentUserId || msg.is_recalled) return false;
@@ -69,4 +84,6 @@ export default function MessageList({ messages, currentUserId, onRecall, onMarkR
       <div ref={bottomRef} />
     </div>
   );
-}
+});
+
+export default MessageList;

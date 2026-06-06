@@ -17,6 +17,7 @@ export default function ChatWindow({ room, currentUserId }) {
   const abortRef = useRef(null);
   const messagesRef = useRef([]);
   const totalRef = useRef(0);
+  const listRef = useRef(null);
 
   useEffect(() => {
     messagesRef.current = messages;
@@ -39,7 +40,8 @@ export default function ChatWindow({ room, currentUserId }) {
       try {
         const response = await api.listMessages(room.id, controller.signal, PAGE_SIZE, 0);
         if (!cancelled && !controller.signal.aborted) {
-          setMessages(response.items);
+          const reversed = [...response.items].reverse();
+          setMessages(reversed);
           setTotal(response.total);
         }
       } catch (e) {
@@ -60,16 +62,30 @@ export default function ChatWindow({ room, currentUserId }) {
   const handleLoadMore = useCallback(async () => {
     if (loadingMore || messagesRef.current.length >= totalRef.current) return;
 
+    const scrollContainer = listRef.current;
+    const prevScrollHeight = scrollContainer ? scrollContainer.scrollHeight : 0;
+    const prevScrollTop = scrollContainer ? scrollContainer.scrollTop : 0;
+
     setLoadingMore(true);
     try {
       const offset = messagesRef.current.length;
       const response = await api.listMessages(room.id, undefined, PAGE_SIZE, offset);
+      const olderMessages = [...response.items].reverse();
+
       setMessages(prev => {
         const existingIds = new Set(prev.map(m => m.id));
-        const newItems = response.items.filter(m => !existingIds.has(m.id));
+        const newItems = olderMessages.filter(m => !existingIds.has(m.id));
         return [...newItems, ...prev];
       });
       setTotal(response.total);
+
+      requestAnimationFrame(() => {
+        if (scrollContainer) {
+          const newScrollHeight = scrollContainer.scrollHeight;
+          const heightDiff = newScrollHeight - prevScrollHeight;
+          scrollContainer.scrollTop = prevScrollTop + heightDiff;
+        }
+      });
     } catch (e) {
       console.error('Failed to load more messages', e);
     } finally {
@@ -158,6 +174,7 @@ export default function ChatWindow({ room, currentUserId }) {
         <div className="loading">加载中...</div>
       ) : (
         <MessageList
+          ref={listRef}
           messages={messages}
           currentUserId={currentUserId}
           onRecall={handleRecall}
