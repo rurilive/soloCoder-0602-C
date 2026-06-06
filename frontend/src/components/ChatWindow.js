@@ -8,7 +8,7 @@ import './ChatWindow.css';
 
 const PAGE_SIZE = 50;
 
-export default function ChatWindow({ room, currentUserId }) {
+export default function ChatWindow({ room, currentUserId, currentUser }) {
   const [messages, setMessages] = useState([]);
   const [total, setTotal] = useState(0);
   const [typingUsers, setTypingUsers] = useState([]);
@@ -147,9 +147,9 @@ export default function ChatWindow({ room, currentUserId }) {
   }, [room.id, currentUserId]);
 
   const handleRecall = useCallback(async (messageId) => {
-    await api.recallMessage(messageId, currentUserId);
+    await api.recallMessage(messageId);
     setMessages(prev => prev.map(m => m.id === messageId ? { ...m, is_recalled: true } : m));
-  }, [currentUserId]);
+  }, []);
 
   const handleMarkRead = useCallback(async (messageId) => {
     const target = messagesRef.current.find(m => m.id === messageId);
@@ -190,6 +190,7 @@ export default function ChatWindow({ room, currentUserId }) {
           ref={listRef}
           messages={messages}
           currentUserId={currentUserId}
+          currentUser={currentUser}
           onRecall={handleRecall}
           onMarkRead={handleMarkRead}
           onLoadMore={handleLoadMore}

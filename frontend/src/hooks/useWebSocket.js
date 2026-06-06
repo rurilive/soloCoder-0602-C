@@ -1,4 +1,5 @@
 import { useEffect, useRef, useCallback } from 'react';
+import { getToken } from '../services/api';
 
 export function useWebSocket(roomId, userId, onMessage) {
   const wsRef = useRef(null);
@@ -8,7 +9,8 @@ export function useWebSocket(roomId, userId, onMessage) {
   const connect = useCallback(() => {
     if (!roomId || !userId) return;
 
-    const ws = new WebSocket(`ws://localhost:3331/ws/${roomId}?user_id=${userId}`);
+    const token = getToken();
+    const ws = new WebSocket(`ws://localhost:3331/ws/${roomId}?token=${encodeURIComponent(token || '')}`);
     wsRef.current = ws;
 
     ws.onmessage = (event) => {

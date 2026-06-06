@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useCallback, forwardRef } from 'react';
 import './MessageList.css';
 
 const MessageList = forwardRef(function MessageList(
-  { messages, currentUserId, onRecall, onMarkRead, onLoadMore, hasMore, loadingMore },
+  { messages, currentUserId, currentUser, onRecall, onMarkRead, onLoadMore, hasMore, loadingMore },
   ref
 ) {
   const bottomRef = useRef(null);
@@ -49,7 +49,10 @@ const MessageList = forwardRef(function MessageList(
   }, [onLoadMore, loadingMore, hasMore, listRef]);
 
   const canRecall = (msg) => {
-    if (msg.sender_id !== currentUserId || msg.is_recalled) return false;
+    if (msg.is_recalled) return false;
+    const isAdmin = currentUser?.role === 'admin';
+    if (isAdmin) return true;
+    if (msg.sender_id !== currentUserId) return false;
     const created = new Date(msg.created_at);
     return Date.now() - created.getTime() < 120_000;
   };
