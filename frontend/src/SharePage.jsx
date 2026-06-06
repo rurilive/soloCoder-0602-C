@@ -109,7 +109,7 @@ export default function SharePage() {
                 {formatSize(shareData.item.size)} · {formatDate(shareData.item.modified)}
               </div>
             </div>
-            <button className="btn btn-primary" style={{ width: '100%' }} onClick={() => handleDownload(shareData.item.path)}>
+            <button className="btn btn-primary" style={{ width: '100%' }} onClick={() => handleDownload()}>
               ⬇️ 下载文件
             </button>
           </div>
