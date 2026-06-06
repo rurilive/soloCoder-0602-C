@@ -1,8 +1,15 @@
 import os
+from pathlib import Path
 
-PORT = int(os.getenv("PORT", 3331))
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./chat.db")
-RECALL_WINDOW_SECONDS = 120
-SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-in-production-32-chars-min!")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
+BASE_DIR = Path(__file__).resolve().parent.parent
+DATA_DIR = BASE_DIR / "data"
+FILES_DIR = DATA_DIR / "files"
+SHARES_DIR = DATA_DIR / "shares"
+
+class Config:
+    PORT = 3331
+    HOST = "0.0.0.0"
+    MAX_CONTENT_LENGTH = 1024 * 1024 * 1024
+    FILES_DIR = FILES_DIR
+    SHARES_DIR = SHARES_DIR
+    SECRET_KEY = os.environ.get("SECRET_KEY", "dev-secret-key-change-in-production")
