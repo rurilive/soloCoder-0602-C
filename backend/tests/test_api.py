@@ -257,6 +257,52 @@ async def test_send_message_admin_can_impersonate(client, test_users):
 
 
 @pytest.mark.asyncio
+async def test_send_message_not_member_forbidden(client, test_users):
+    token = await get_token(client, "user3")
+    room_resp = await client.post(
+        "/api/rooms",
+        json={"member_ids": ["user1", "user2"], "is_group": False},
+        headers=auth_headers(await get_token(client, "user1")),
+    )
+    room_id = room_resp.json()["id"]
+
+    response = await client.post(
+        "/api/messages",
+        json={
+            "room_id": room_id,
+            "sender_id": "user3",
+            "content": "I'm not a member!",
+        },
+        headers=auth_headers(token),
+    )
+    assert response.status_code == 403
+    assert "Not a member" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_send_message_admin_can_send_to_any_room(client, test_users):
+    token_user1 = await get_token(client, "user1")
+    room_resp = await client.post(
+        "/api/rooms",
+        json={"member_ids": ["user1", "user2"], "is_group": False},
+        headers=auth_headers(token_user1),
+    )
+    room_id = room_resp.json()["id"]
+
+    token_admin = await get_token(client, "admin1")
+    response = await client.post(
+        "/api/messages",
+        json={
+            "room_id": room_id,
+            "sender_id": "admin1",
+            "content": "Admin message to any room",
+        },
+        headers=auth_headers(token_admin),
+    )
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
 async def test_list_messages_pagination(client, test_users):
     token = await get_token(client, "user1")
     room_resp = await client.post(

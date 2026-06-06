@@ -1,21 +1,73 @@
 import { useEffect, useRef, useCallback } from 'react';
-import { getToken } from '../services/api';
+import { getToken, api } from '../services/api';
 
 export function useWebSocket(roomId, userId, onMessage) {
   const wsRef = useRef(null);
   const onMessageRef = useRef(onMessage);
+  const lastEventIdRef = useRef(null);
+  const isReconnectRef = useRef(false);
   onMessageRef.current = onMessage;
+
+  const fetchMissingMessages = useCallback(async () => {
+    if (!roomId || !lastEventIdRef.current) return;
+    try {
+      let allNewMessages = [];
+      let offset = 0;
+      const limit = 200;
+      let foundLastEvent = false;
+
+      while (!foundLastEvent) {
+        const response = await api.listMessages(roomId, undefined, limit, offset);
+        const messages = response.items;
+
+        if (messages.length === 0) break;
+
+        const lastEventIndex = messages.findIndex(m => m.id === lastEventIdRef.current);
+        if (lastEventIndex !== -1) {
+          allNewMessages = [...messages.slice(0, lastEventIndex), ...allNewMessages];
+          foundLastEvent = true;
+        } else {
+          allNewMessages = [...messages, ...allNewMessages];
+          offset += limit;
+          if (offset >= response.total) break;
+        }
+      }
+
+      allNewMessages.reverse().forEach(msg => {
+        onMessageRef.current({
+          type: 'new_message',
+          payload: msg,
+        });
+      });
+    } catch (e) {
+      console.error('Failed to fetch missing messages after reconnect', e);
+    }
+  }, [roomId]);
 
   const connect = useCallback(() => {
     if (!roomId || !userId) return;
 
     const token = getToken();
-    const ws = new WebSocket(`ws://localhost:3331/ws/${roomId}?token=${encodeURIComponent(token || '')}`);
+    const wsUrl = lastEventIdRef.current
+      ? `ws://localhost:3331/ws/${roomId}?token=${encodeURIComponent(token || '')}&last_event_id=${encodeURIComponent(lastEventIdRef.current)}`
+      : `ws://localhost:3331/ws/${roomId}?token=${encodeURIComponent(token || '')}`;
+
+    const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
+
+    ws.onopen = () => {
+      if (isReconnectRef.current) {
+        fetchMissingMessages();
+      }
+      isReconnectRef.current = false;
+    };
 
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
+        if (data.type === 'new_message' && data.payload && data.payload.id) {
+          lastEventIdRef.current = data.payload.id;
+        }
         onMessageRef.current(data);
       } catch (e) {
         // ignore
@@ -23,15 +75,18 @@ export function useWebSocket(roomId, userId, onMessage) {
     };
 
     ws.onclose = () => {
+      isReconnectRef.current = true;
       setTimeout(() => {
         if (wsRef.current === ws) connect();
       }, 3000);
     };
 
     ws.onerror = () => ws.close();
-  }, [roomId, userId]);
+  }, [roomId, userId, fetchMissingMessages]);
 
   useEffect(() => {
+    lastEventIdRef.current = null;
+    isReconnectRef.current = false;
     connect();
     return () => {
       if (wsRef.current) {
@@ -48,5 +103,11 @@ export function useWebSocket(roomId, userId, onMessage) {
     }
   }, []);
 
-  return { sendTyping };
+  const setLastEventId = useCallback((eventId) => {
+    if (eventId) {
+      lastEventIdRef.current = eventId;
+    }
+  }, []);
+
+  return { sendTyping, setLastEventId };
 }

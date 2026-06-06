@@ -143,6 +143,17 @@ async def send_message(
 ):
     if body.sender_id != current_user.id and current_user.role != UserRole.ADMIN.value:
         raise HTTPException(403, "Cannot send messages as another user")
+
+    if current_user.role != UserRole.ADMIN.value:
+        member_result = await db.execute(
+            select(RoomMember).where(
+                RoomMember.room_id == body.room_id,
+                RoomMember.user_id == body.sender_id,
+            )
+        )
+        if not member_result.scalar_one_or_none():
+            raise HTTPException(403, "Not a member of this room")
+
     msg_id = str(uuid.uuid4())
     msg = Message(id=msg_id, room_id=body.room_id, sender_id=body.sender_id, content=body.content)
     db.add(msg)
@@ -206,10 +217,22 @@ async def list_messages(
         .offset(offset)
     )
     messages = result.scalars().all()
+
+    message_ids = [m.id for m in messages]
+    read_by_map = {}
+    if message_ids:
+        rr_result = await db.execute(
+            select(ReadReceipt.message_id, ReadReceipt.user_id)
+            .where(ReadReceipt.message_id.in_(message_ids))
+        )
+        for msg_id, user_id in rr_result.all():
+            if msg_id not in read_by_map:
+                read_by_map[msg_id] = []
+            read_by_map[msg_id].append(user_id)
+
     out = []
     for m in messages:
-        rr = await db.execute(select(ReadReceipt.user_id).where(ReadReceipt.message_id == m.id))
-        read_by = [r for r in rr.scalars().all()]
+        read_by = read_by_map.get(m.id, [])
         out.append(MessageOut(
             id=m.id, room_id=m.room_id, sender_id=m.sender_id,
             content=m.content, is_recalled=m.is_recalled,

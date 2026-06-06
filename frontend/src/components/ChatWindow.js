@@ -50,6 +50,9 @@ export default function ChatWindow({ room, currentUserId, currentUser }) {
           setMessages(reversed);
           setTotal(response.total);
           setLoadedHistoryCount(response.items.length);
+          if (response.items.length > 0) {
+            setLastEventId(response.items[0].id);
+          }
         }
       } catch (e) {
         if (e.name !== 'AbortError') {
@@ -86,6 +89,9 @@ export default function ChatWindow({ room, currentUserId, currentUser }) {
       if (newItems.length > 0) {
         setMessages(prev => [...newItems, ...prev]);
         setLoadedHistoryCount(prev => prev + newItems.length);
+      }
+      if (response.items.length > 0 && offset === 0) {
+        setLastEventId(response.items[0].id);
       }
 
       if (response.total !== totalRef.current) {
@@ -140,7 +146,7 @@ export default function ChatWindow({ room, currentUserId, currentUser }) {
     }
   }, []);
 
-  const { sendTyping } = useWebSocket(room.id, currentUserId, handleWSMessage);
+  const { sendTyping, setLastEventId } = useWebSocket(room.id, currentUserId, handleWSMessage);
 
   const handleSend = useCallback(async (content) => {
     await api.sendMessage(room.id, currentUserId, content);
