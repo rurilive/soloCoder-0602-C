@@ -18,6 +18,7 @@ export default function ChatWindow({ room, currentUserId }) {
   const messagesRef = useRef([]);
   const totalRef = useRef(0);
   const listRef = useRef(null);
+  const loadedHistoryCount = useRef(0);
 
   useEffect(() => {
     messagesRef.current = messages;
@@ -29,6 +30,7 @@ export default function ChatWindow({ room, currentUserId }) {
     setTotal(0);
     setTypingUsers([]);
     setLoading(true);
+    loadedHistoryCount.current = 0;
 
     if (abortRef.current) abortRef.current.abort();
     const controller = new AbortController();
@@ -43,6 +45,7 @@ export default function ChatWindow({ room, currentUserId }) {
           const reversed = [...response.items].reverse();
           setMessages(reversed);
           setTotal(response.total);
+          loadedHistoryCount.current = response.items.length;
         }
       } catch (e) {
         if (e.name !== 'AbortError') {
@@ -60,7 +63,7 @@ export default function ChatWindow({ room, currentUserId }) {
   }, [room.id]);
 
   const handleLoadMore = useCallback(async () => {
-    if (loadingMore || messagesRef.current.length >= totalRef.current) return;
+    if (loadingMore || loadedHistoryCount.current >= totalRef.current) return;
 
     const scrollContainer = listRef.current;
     const prevScrollHeight = scrollContainer ? scrollContainer.scrollHeight : 0;
@@ -68,13 +71,14 @@ export default function ChatWindow({ room, currentUserId }) {
 
     setLoadingMore(true);
     try {
-      const offset = messagesRef.current.length;
+      const offset = loadedHistoryCount.current;
       const response = await api.listMessages(room.id, undefined, PAGE_SIZE, offset);
       const olderMessages = [...response.items].reverse();
 
       setMessages(prev => {
         const existingIds = new Set(prev.map(m => m.id));
         const newItems = olderMessages.filter(m => !existingIds.has(m.id));
+        loadedHistoryCount.current += newItems.length;
         return [...newItems, ...prev];
       });
       setTotal(response.total);
@@ -162,7 +166,7 @@ export default function ChatWindow({ room, currentUserId }) {
   }, [sendTyping, currentUserId]);
 
   const roomName = room.name || room.members.filter(m => m.id !== currentUserId).map(m => m.username).join(', ');
-  const hasMore = messages.length < total;
+  const hasMore = loadedHistoryCount.current < total;
 
   return (
     <div className="chat-window">
