@@ -144,8 +144,8 @@ function App() {
         setShowPreview(true)
       })
     } else if (['.txt', '.md', '.json', '.xml', '.html', '.css', '.js', '.py', '.csv', '.log'].includes(ext)) {
-      api.previewText(item.path).then(res => {
-        setPreviewData({ type: 'text', content: res.data.content, name: item.name })
+      api.previewText(item.path).then(data => {
+        setPreviewData({ type: 'text', content: data.content, name: item.name })
         setShowPreview(true)
       })
     } else if (ext === '.pdf') {

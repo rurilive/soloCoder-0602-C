@@ -18,9 +18,15 @@ export const api = {
   moveItem: (src, dst) => axios.post(`${API_BASE}/files/move`, { src, dst }),
   copyItem: (src, dst) => axios.post(`${API_BASE}/files/copy`, { src, dst }),
   previewFile: (path) => axios.get(`${API_BASE}/files/preview?path=${encodeURIComponent(path)}`, { responseType: 'blob' }),
-  previewText: (path) => axios.get(`${API_BASE}/files/preview?path=${encodeURIComponent(path)}`),
+  previewText: (path) => axios.get(`${API_BASE}/files/preview?path=${encodeURIComponent(path)}`).then(res => res.data),
   downloadFile: (path) => `${API_BASE}/files/download?path=${encodeURIComponent(path)}`,
   createShare: (path, expireHours, password) => axios.post(`${API_BASE}/share`, { path, expireHours, password }),
   getShare: (shareId, password) => axios.post(`${API_BASE}/share/${shareId}`, { password }),
-  shareDownload: (shareId, password) => `${API_BASE}/share/${shareId}/download?password=${encodeURIComponent(password || '')}`,
+  shareDownload: (shareId, password, subpath = '') => {
+    let url = `${API_BASE}/share/${shareId}/download?password=${encodeURIComponent(password || '')}`
+    if (subpath) {
+      url += `&subpath=${encodeURIComponent(subpath)}`
+    }
+    return url
+  },
 }

@@ -50,8 +50,8 @@ export default function SharePage() {
     loadShare(password)
   }
 
-  const handleDownload = (path) => {
-    const url = api.shareDownload(shareId, password)
+  const handleDownload = (subpath = '') => {
+    const url = api.shareDownload(shareId, password, subpath)
     window.open(url, '_blank')
   }
 
@@ -118,13 +118,27 @@ export default function SharePage() {
           <div>
             <p style={{ color: '#666', marginBottom: '12px' }}>包含 {shareData.items?.length || 0} 个文件/文件夹</p>
             <div style={{ maxHeight: '400px', overflow: 'auto', border: '1px solid #eee', borderRadius: '8px' }}>
-              {shareData.items?.map(item => (
-                <div key={item.path} style={{ padding: '10px 12px', borderBottom: '1px solid #f0f0f0', display: 'flex', alignItems: 'center', gap: '10px' }}>
-                  <span>{item.isDir ? '📁' : '📄'}</span>
-                  <span style={{ flex: 1 }}>{item.name}</span>
-                  <span style={{ color: '#888', fontSize: '12px' }}>{item.isDir ? '-' : formatSize(item.size)}</span>
-                </div>
-              ))}
+              {shareData.items?.map(item => {
+                const relPath = item.path.startsWith(shareData.path + '/')
+                  ? item.path.slice(shareData.path.length + 1)
+                  : item.path
+                return (
+                  <div key={item.path} style={{ padding: '10px 12px', borderBottom: '1px solid #f0f0f0', display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <span>{item.isDir ? '📁' : '📄'}</span>
+                    <span style={{ flex: 1 }}>{item.name}</span>
+                    <span style={{ color: '#888', fontSize: '12px', marginRight: '8px' }}>{item.isDir ? '-' : formatSize(item.size)}</span>
+                    {!item.isDir && (
+                      <button
+                        className="btn btn-secondary btn-small"
+                        onClick={(e) => { e.stopPropagation(); handleDownload(relPath); }}
+                        style={{ padding: '4px 10px', fontSize: '12px' }}
+                      >
+                        ⬇️ 下载
+                      </button>
+                    )}
+                  </div>
+                )
+              })}
             </div>
           </div>
         )}

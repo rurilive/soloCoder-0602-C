@@ -182,14 +182,23 @@ def create_app():
     @app.route("/api/share/<share_id>/download", methods=["GET", "POST"])
     def api_share_download(share_id):
         password = request.args.get("password")
+        subpath = request.args.get("subpath", "")
         if not password and request.method == "POST":
             data = request.get_json()
             password = data.get("password")
+            subpath = data.get("subpath", "")
         try:
             share, error = get_share(share_id, password)
             if error:
                 return jsonify({"success": False, "error": error}), 400
-            abs_path = get_abs_path(share["path"])
+            base_path = get_abs_path(share["path"])
+            if subpath:
+                subpath = subpath.lstrip("/")
+                abs_path = (base_path / subpath).resolve()
+                if not str(abs_path).startswith(str(base_path.resolve())):
+                    return jsonify({"success": False, "error": "Invalid subpath"}), 400
+            else:
+                abs_path = base_path
             if not abs_path.exists() or not abs_path.is_file():
                 return jsonify({"success": False, "error": "Not found"}), 404
             return send_file(str(abs_path), as_attachment=True, download_name=abs_path.name)
