@@ -87,8 +87,13 @@ export const api = {
   sendMessage: (roomId, senderId, content) =>
     request('/messages', { method: 'POST', body: JSON.stringify({ room_id: roomId, sender_id: senderId, content }) }),
 
-  listMessages: (roomId, signal, limit = 50, offset = 0) =>
-    request(`/messages/${roomId}?limit=${limit}&offset=${offset}`, { signal }),
+  listMessages: (roomId, signal, limit = 50, offset = 0, sinceId = null) => {
+    let url = `/messages/${roomId}?limit=${limit}&offset=${offset}`;
+    if (sinceId) {
+      url += `&since_id=${encodeURIComponent(sinceId)}`;
+    }
+    return request(url, { signal });
+  },
 
   recallMessage: (messageId) =>
     request(`/messages/${messageId}/recall`, { method: 'PUT' }),

@@ -42,6 +42,7 @@ class Message(Base):
     __tablename__ = "messages"
 
     id = Column(String, primary_key=True)
+    seq = Column(Integer, unique=True, nullable=True)
     room_id = Column(String, ForeignKey("rooms.id"), nullable=False)
     sender_id = Column(String, ForeignKey("users.id"), nullable=False)
     content = Column(Text, nullable=False)

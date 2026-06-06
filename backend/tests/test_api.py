@@ -658,3 +658,74 @@ async def test_create_room_with_duplicate_member_ids(client, test_users):
     assert response.status_code == 200
     data = response.json()
     assert len(data["members"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_send_message_nonexistent_room_404(client, test_users):
+    token = await get_token(client, "user1")
+    response = await client.post(
+        "/api/messages",
+        json={
+            "room_id": "nonexistent-room-id",
+            "sender_id": "user1",
+            "content": "Hello!",
+        },
+        headers=auth_headers(token),
+    )
+    assert response.status_code == 404
+    assert "Room not found" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_send_message_admin_nonexistent_room_404(client, test_users):
+    token = await get_token(client, "admin1")
+    response = await client.post(
+        "/api/messages",
+        json={
+            "room_id": "nonexistent-room-id",
+            "sender_id": "admin1",
+            "content": "Hello!",
+        },
+        headers=auth_headers(token),
+    )
+    assert response.status_code == 404
+    assert "Room not found" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_list_messages_since_id(client, test_users):
+    token = await get_token(client, "user1")
+    room_resp = await client.post(
+        "/api/rooms",
+        json={"member_ids": ["user1", "user2"], "is_group": False},
+        headers=auth_headers(token),
+    )
+    room_id = room_resp.json()["id"]
+
+    for i in range(5):
+        await client.post(
+            "/api/messages",
+            json={
+                "room_id": room_id,
+                "sender_id": "user1",
+                "content": f"Message {i}",
+            },
+            headers=auth_headers(token),
+        )
+
+    all_resp = await client.get(
+        f"/api/messages/{room_id}?limit=50",
+        headers=auth_headers(token),
+    )
+    all_messages = all_resp.json()["items"]
+    assert len(all_messages) == 5
+
+    third_msg_id = all_messages[2]["id"]
+    since_resp = await client.get(
+        f"/api/messages/{room_id}?limit=50&since_id={third_msg_id}",
+        headers=auth_headers(token),
+    )
+    since_messages = since_resp.json()["items"]
+    assert len(since_messages) == 2
+    since_ids = {m["id"] for m in since_messages}
+    assert third_msg_id not in since_ids

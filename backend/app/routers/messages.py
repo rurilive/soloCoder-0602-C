@@ -144,6 +144,10 @@ async def send_message(
     if body.sender_id != current_user.id and current_user.role != UserRole.ADMIN.value:
         raise HTTPException(403, "Cannot send messages as another user")
 
+    room_result = await db.execute(select(Room).where(Room.id == body.room_id))
+    if not room_result.scalar_one_or_none():
+        raise HTTPException(404, "Room not found")
+
     if current_user.role != UserRole.ADMIN.value:
         member_result = await db.execute(
             select(RoomMember).where(
@@ -155,7 +159,20 @@ async def send_message(
             raise HTTPException(403, "Not a member of this room")
 
     msg_id = str(uuid.uuid4())
-    msg = Message(id=msg_id, room_id=body.room_id, sender_id=body.sender_id, content=body.content)
+
+    max_seq_result = await db.execute(
+        select(func.max(Message.seq))
+    )
+    max_seq = max_seq_result.scalar_one() or 0
+    next_seq = max_seq + 1
+
+    msg = Message(
+        id=msg_id,
+        seq=next_seq,
+        room_id=body.room_id,
+        sender_id=body.sender_id,
+        content=body.content,
+    )
     db.add(msg)
     await db.commit()
     await db.refresh(msg)
@@ -185,6 +202,7 @@ async def list_messages(
     room_id: str,
     limit: int = 50,
     offset: int = 0,
+    since_id: str | None = None,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -204,15 +222,22 @@ async def list_messages(
     if offset < 0:
         offset = 0
 
-    count_result = await db.execute(
-        select(func.count()).select_from(Message).where(Message.room_id == room_id)
-    )
+    base_query = select(Message).where(Message.room_id == room_id)
+    count_query = select(func.count()).select_from(Message).where(Message.room_id == room_id)
+
+    if since_id:
+        since_msg = await db.execute(select(Message).where(Message.id == since_id))
+        since_msg_obj = since_msg.scalar_one_or_none()
+        if since_msg_obj:
+            base_query = base_query.where(Message.seq > since_msg_obj.seq)
+            count_query = count_query.where(Message.seq > since_msg_obj.seq)
+
+    count_result = await db.execute(count_query)
     total = count_result.scalar_one()
 
     result = await db.execute(
-        select(Message)
-        .where(Message.room_id == room_id)
-        .order_by(Message.created_at.desc())
+        base_query
+        .order_by(Message.seq.desc())
         .limit(limit)
         .offset(offset)
     )

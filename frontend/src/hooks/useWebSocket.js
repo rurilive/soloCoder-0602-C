@@ -11,34 +11,27 @@ export function useWebSocket(roomId, userId, onMessage) {
   const fetchMissingMessages = useCallback(async () => {
     if (!roomId || !lastEventIdRef.current) return;
     try {
-      let allNewMessages = [];
-      let offset = 0;
       const limit = 200;
-      let foundLastEvent = false;
+      let offset = 0;
+      let hasMore = true;
 
-      while (!foundLastEvent) {
-        const response = await api.listMessages(roomId, undefined, limit, offset);
-        const messages = response.items;
+      while (hasMore) {
+        const response = await api.listMessages(roomId, undefined, limit, offset, lastEventIdRef.current);
+        const messages = [...response.items].reverse();
 
         if (messages.length === 0) break;
 
-        const lastEventIndex = messages.findIndex(m => m.id === lastEventIdRef.current);
-        if (lastEventIndex !== -1) {
-          allNewMessages = [...messages.slice(0, lastEventIndex), ...allNewMessages];
-          foundLastEvent = true;
-        } else {
-          allNewMessages = [...messages, ...allNewMessages];
-          offset += limit;
-          if (offset >= response.total) break;
-        }
-      }
-
-      allNewMessages.reverse().forEach(msg => {
-        onMessageRef.current({
-          type: 'new_message',
-          payload: msg,
+        messages.forEach(msg => {
+          onMessageRef.current({
+            type: 'new_message',
+            payload: msg,
+          });
+          lastEventIdRef.current = msg.id;
         });
-      });
+
+        offset += messages.length;
+        hasMore = offset < response.total;
+      }
     } catch (e) {
       console.error('Failed to fetch missing messages after reconnect', e);
     }
