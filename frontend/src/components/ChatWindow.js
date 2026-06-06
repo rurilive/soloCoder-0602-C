@@ -14,23 +14,27 @@ export default function ChatWindow({ room, currentUserId }) {
   const [typingUsers, setTypingUsers] = useState([]);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [loadedHistoryCount, setLoadedHistoryCount] = useState(0);
   const abortRef = useRef(null);
   const messagesRef = useRef([]);
   const totalRef = useRef(0);
   const listRef = useRef(null);
-  const loadedHistoryCount = useRef(0);
+  const loadingMoreRef = useRef(false);
+  const loadedHistoryCountRef = useRef(0);
 
   useEffect(() => {
     messagesRef.current = messages;
     totalRef.current = total;
-  }, [messages, total]);
+    loadingMoreRef.current = loadingMore;
+    loadedHistoryCountRef.current = loadedHistoryCount;
+  }, [messages, total, loadingMore, loadedHistoryCount]);
 
   useEffect(() => {
     setMessages([]);
     setTotal(0);
     setTypingUsers([]);
     setLoading(true);
-    loadedHistoryCount.current = 0;
+    setLoadedHistoryCount(0);
 
     if (abortRef.current) abortRef.current.abort();
     const controller = new AbortController();
@@ -45,7 +49,7 @@ export default function ChatWindow({ room, currentUserId }) {
           const reversed = [...response.items].reverse();
           setMessages(reversed);
           setTotal(response.total);
-          loadedHistoryCount.current = response.items.length;
+          setLoadedHistoryCount(response.items.length);
         }
       } catch (e) {
         if (e.name !== 'AbortError') {
@@ -63,8 +67,8 @@ export default function ChatWindow({ room, currentUserId }) {
   }, [room.id]);
 
   const handleLoadMore = useCallback(async () => {
-    if (loadingMore) return;
-    if (loadedHistoryCount.current >= totalRef.current) return;
+    if (loadingMoreRef.current) return;
+    if (loadedHistoryCountRef.current >= totalRef.current) return;
 
     const scrollContainer = listRef.current;
     const prevScrollHeight = scrollContainer ? scrollContainer.scrollHeight : 0;
@@ -72,7 +76,7 @@ export default function ChatWindow({ room, currentUserId }) {
 
     setLoadingMore(true);
     try {
-      const offset = loadedHistoryCount.current;
+      const offset = loadedHistoryCountRef.current;
       const response = await api.listMessages(room.id, undefined, PAGE_SIZE, offset);
 
       const olderMessages = [...response.items].reverse();
@@ -81,7 +85,7 @@ export default function ChatWindow({ room, currentUserId }) {
 
       if (newItems.length > 0) {
         setMessages(prev => [...newItems, ...prev]);
-        loadedHistoryCount.current += newItems.length;
+        setLoadedHistoryCount(prev => prev + newItems.length);
       }
 
       if (response.total !== totalRef.current) {
@@ -100,7 +104,7 @@ export default function ChatWindow({ room, currentUserId }) {
     } finally {
       setLoadingMore(false);
     }
-  }, [room.id, loadingMore]);
+  }, [room.id]);
 
   const handleWSMessage = useCallback((data) => {
     if (data.type === 'new_message') {
@@ -171,7 +175,7 @@ export default function ChatWindow({ room, currentUserId }) {
   }, [sendTyping, currentUserId]);
 
   const roomName = room.name || room.members.filter(m => m.id !== currentUserId).map(m => m.username).join(', ');
-  const hasMore = loadedHistoryCount.current < total;
+  const hasMore = loadedHistoryCount < total;
 
   return (
     <div className="chat-window">
