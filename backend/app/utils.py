@@ -8,12 +8,13 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from werkzeug.utils import secure_filename
 
-from .config import FILES_DIR, SHARES_DIR
+from .config import FILES_DIR, SHARES_DIR, USERS_DIR
 
 
 def ensure_dirs():
     FILES_DIR.mkdir(parents=True, exist_ok=True)
     SHARES_DIR.mkdir(parents=True, exist_ok=True)
+    USERS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def get_abs_path(rel_path: str) -> Path:
@@ -147,3 +148,23 @@ def get_share(share_id: str, password: Optional[str] = None) -> Tuple[Optional[D
         if input_hash != share["passwordHash"]:
             return None, "Invalid password"
     return share, None
+
+
+def search_files(query: str, extension: Optional[str] = None, path: str = "") -> List[Dict]:
+    abs_path = get_abs_path(path)
+    if not abs_path.exists() or not abs_path.is_dir():
+        return []
+    query = query.lower()
+    results = []
+    for item in abs_path.rglob("*"):
+        try:
+            if query in item.name.lower():
+                if extension:
+                    ext = f".{extension.lstrip('.').lower()}"
+                    if item.is_file() and item.suffix.lower() != ext:
+                        continue
+                results.append(get_file_info(item))
+        except (PermissionError, OSError):
+            continue
+    results.sort(key=lambda x: (not x["isDir"], x["name"].lower()))
+    return results

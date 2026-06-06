@@ -17,6 +17,13 @@ from .utils import (
     create_share,
     get_share,
     get_file_info,
+    search_files,
+)
+from .auth import (
+    create_user,
+    authenticate_user,
+    generate_token,
+    token_required,
 )
 
 
@@ -26,7 +33,40 @@ def create_app():
     CORS(app)
     ensure_dirs()
 
+    @app.route("/api/auth/register", methods=["POST"])
+    def api_register():
+        data = request.get_json()
+        username = data.get("username", "")
+        password = data.get("password", "")
+        if not username or not password:
+            return jsonify({"success": False, "error": "Username and password are required"}), 400
+        if len(username) < 3 or len(username) > 32:
+            return jsonify({"success": False, "error": "Username must be between 3 and 32 characters"}), 400
+        if len(password) < 6:
+            return jsonify({"success": False, "error": "Password must be at least 6 characters"}), 400
+        try:
+            user = create_user(username, password)
+            token = generate_token(user["id"], user["username"])
+            return jsonify({"success": True, "user": user, "token": token})
+        except ValueError as e:
+            return jsonify({"success": False, "error": str(e)}), 400
+
+    @app.route("/api/auth/login", methods=["POST"])
+    def api_login():
+        data = request.get_json()
+        username = data.get("username", "")
+        password = data.get("password", "")
+        if not username or not password:
+            return jsonify({"success": False, "error": "Username and password are required"}), 400
+        try:
+            user = authenticate_user(username, password)
+            token = generate_token(user["id"], user["username"])
+            return jsonify({"success": True, "user": user, "token": token})
+        except ValueError as e:
+            return jsonify({"success": False, "error": str(e)}), 401
+
     @app.route("/api/files", methods=["GET"])
+    @token_required
     def api_list_files():
         path = request.args.get("path", "")
         try:
@@ -35,7 +75,22 @@ def create_app():
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 400
 
+    @app.route("/api/files/search", methods=["GET"])
+    @token_required
+    def api_search_files():
+        query = request.args.get("q", "")
+        extension = request.args.get("ext", None)
+        path = request.args.get("path", "")
+        if not query:
+            return jsonify({"success": False, "error": "Search query is required"}), 400
+        try:
+            items = search_files(query, extension, path)
+            return jsonify({"success": True, "items": items, "query": query, "extension": extension})
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)}), 400
+
     @app.route("/api/files/upload", methods=["POST"])
+    @token_required
     def api_upload():
         path = request.form.get("path", "")
         if "file" not in request.files:
@@ -50,6 +105,7 @@ def create_app():
             return jsonify({"success": False, "error": str(e)}), 400
 
     @app.route("/api/files/folder", methods=["POST"])
+    @token_required
     def api_create_folder():
         data = request.get_json()
         path = data.get("path", "")
@@ -63,6 +119,7 @@ def create_app():
             return jsonify({"success": False, "error": str(e)}), 400
 
     @app.route("/api/files/delete", methods=["POST"])
+    @token_required
     def api_delete():
         data = request.get_json()
         path = data.get("path", "")
@@ -73,6 +130,7 @@ def create_app():
             return jsonify({"success": False, "error": str(e)}), 400
 
     @app.route("/api/files/rename", methods=["POST"])
+    @token_required
     def api_rename():
         data = request.get_json()
         path = data.get("path", "")
@@ -86,6 +144,7 @@ def create_app():
             return jsonify({"success": False, "error": str(e)}), 400
 
     @app.route("/api/files/move", methods=["POST"])
+    @token_required
     def api_move():
         data = request.get_json()
         src = data.get("src", "")
@@ -97,6 +156,7 @@ def create_app():
             return jsonify({"success": False, "error": str(e)}), 400
 
     @app.route("/api/files/copy", methods=["POST"])
+    @token_required
     def api_copy():
         data = request.get_json()
         src = data.get("src", "")
@@ -108,6 +168,7 @@ def create_app():
             return jsonify({"success": False, "error": str(e)}), 400
 
     @app.route("/api/files/preview", methods=["GET"])
+    @token_required
     def api_preview():
         path = request.args.get("path", "")
         try:
@@ -130,6 +191,7 @@ def create_app():
             return jsonify({"success": False, "error": str(e)}), 400
 
     @app.route("/api/files/download", methods=["GET"])
+    @token_required
     def api_download():
         path = request.args.get("path", "")
         try:
@@ -144,6 +206,7 @@ def create_app():
             return jsonify({"success": False, "error": str(e)}), 400
 
     @app.route("/api/share", methods=["POST"])
+    @token_required
     def api_create_share():
         data = request.get_json()
         path = data.get("path", "")

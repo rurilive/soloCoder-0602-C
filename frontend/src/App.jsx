@@ -50,7 +50,12 @@ function App() {
   const [shareResult, setShareResult] = useState(null)
   const [uploadProgress, setUploadProgress] = useState(0)
   const [contextMenu, setContextMenu] = useState(null)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchExt, setSearchExt] = useState('')
+  const [searchResults, setSearchResults] = useState([])
+  const [isSearching, setIsSearching] = useState(false)
   const fileInputRef = useRef(null)
+  const searchTimeoutRef = useRef(null)
 
   const loadFiles = async (path = currentPath) => {
     setLoading(true)
@@ -64,6 +69,29 @@ function App() {
   useEffect(() => {
     loadFiles('')
   }, [])
+
+  const handleSearch = (query, ext) => {
+    if (searchTimeoutRef.current) {
+      clearTimeout(searchTimeoutRef.current)
+    }
+    if (!query.trim()) {
+      setIsSearching(false)
+      setSearchResults([])
+      return
+    }
+    setIsSearching(true)
+    searchTimeoutRef.current = setTimeout(() => {
+      api.searchFiles(query.trim(), ext, currentPath).then(res => {
+        setSearchResults(res.data.items || [])
+      }).catch(() => {
+        setSearchResults([])
+      })
+    }, 300)
+  }
+
+  useEffect(() => {
+    handleSearch(searchQuery, searchExt)
+  }, [searchQuery, searchExt])
 
   const navigateTo = (path) => {
     loadFiles(path)
@@ -195,6 +223,13 @@ function App() {
   const pathParts = currentPath ? currentPath.split('/').filter(Boolean) : []
   const image_exts = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg']
 
+  const displayFiles = isSearching ? searchResults : files
+
+  const clearSearch = () => {
+    setSearchQuery('')
+    setSearchExt('')
+  }
+
   return (
     <div className="app">
       <header className="header">
@@ -202,23 +237,60 @@ function App() {
         <div className="actions">
           <button className="btn btn-primary" onClick={() => setShowUploadModal(true)}>📤 上传文件</button>
           <button className="btn btn-primary" onClick={() => setShowNewFolderModal(true)}>📁 新建文件夹</button>
+          <button className="btn btn-secondary" onClick={() => api.logout()}>🚪 退出</button>
         </div>
       </header>
 
       <main className="main">
         <div className="breadcrumb">
           <span>位置：</span>
-          <a onClick={() => navigateTo('')}>根目录</a>
-          {pathParts.map((part, i) => (
+          <a onClick={() => { clearSearch(); navigateTo('') }}>根目录</a>
+          {!isSearching && pathParts.map((part, i) => (
             <React.Fragment key={i}>
               <span>/</span>
-              <a onClick={() => navigateTo(pathParts.slice(0, i + 1).join('/'))}>{part}</a>
+              <a onClick={() => { clearSearch(); navigateTo(pathParts.slice(0, i + 1).join('/')) }}>{part}</a>
             </React.Fragment>
           ))}
+          {isSearching && (
+            <>
+              <span>/</span>
+              <span style={{ color: '#666' }}>搜索: "{searchQuery}"</span>
+              {searchExt && <span style={{ color: '#666', marginLeft: '8px' }}>(.{searchExt})</span>}
+            </>
+          )}
+        </div>
+
+        <div className="search-bar">
+          <div className="search-input-wrapper">
+            <input
+              type="text"
+              className="search-input"
+              placeholder="🔍 搜索文件名..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+            />
+            {searchQuery && (
+              <button className="search-clear" onClick={clearSearch}>✕</button>
+            )}
+          </div>
+          <select
+            className="search-ext-select"
+            value={searchExt}
+            onChange={(e) => setSearchExt(e.target.value)}
+          >
+            <option value="">所有类型</option>
+            <option value="jpg">图片 (jpg)</option>
+            <option value="png">图片 (png)</option>
+            <option value="pdf">PDF</option>
+            <option value="txt">文本</option>
+            <option value="md">Markdown</option>
+            <option value="doc">文档</option>
+            <option value="zip">压缩包</option>
+          </select>
         </div>
 
         <div className="toolbar">
-          {selected && (
+          {selected && !isSearching && (
             <>
               <button className="btn btn-secondary btn-small" onClick={() => handlePreview(selected)}>👁️ 预览</button>
               <button className="btn btn-secondary btn-small" onClick={() => { setRenameValue(selected.name); setShowRenameModal(true) }}>✏️ 重命名</button>
@@ -228,18 +300,25 @@ function App() {
               <button className="btn btn-danger btn-small" onClick={handleDelete}>🗑️ 删除</button>
             </>
           )}
-          {!selected && <span style={{ color: '#999', fontSize: '13px' }}>选择文件或文件夹进行操作</span>}
+          {isSearching && <span style={{ color: '#999', fontSize: '13px' }}>找到 {searchResults.length} 个结果</span>}
+          {!selected && !isSearching && <span style={{ color: '#999', fontSize: '13px' }}>选择文件或文件夹进行操作</span>}
         </div>
 
         <div className="file-list">
           {loading && <div className="empty-state"><div className="icon">⏳</div>加载中...</div>}
-          {!loading && files.length === 0 && (
+          {!loading && isSearching && searchResults.length === 0 && (
+            <div className="empty-state">
+              <div className="icon">🔍</div>
+              <div>未找到匹配的文件</div>
+            </div>
+          )}
+          {!loading && !isSearching && files.length === 0 && (
             <div className="empty-state">
               <div className="icon">📂</div>
               <div>此文件夹为空</div>
             </div>
           )}
-          {files.map(item => (
+          {displayFiles.map(item => (
             <div
               key={item.path}
               className={`file-item ${selected?.path === item.path ? 'selected' : ''}`}
