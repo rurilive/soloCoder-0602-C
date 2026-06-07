@@ -74,7 +74,7 @@ def get_trash_item_info(path: Path, username: str) -> Dict:
     deleted_at_str = parts[0]
     original_path = "/".join(parts[1:])
     try:
-        deleted_at = datetime.fromisoformat(deleted_at_str)
+        deleted_at = datetime.strptime(deleted_at_str, "%Y%m%d%H%M%S")
     except ValueError:
         deleted_at = datetime.fromtimestamp(stat.st_mtime)
     return {
@@ -95,8 +95,8 @@ def soft_delete_item(rel_path: str, username: str) -> bool:
         return False
     trash_dir = get_user_trash_dir(username)
     trash_dir.mkdir(parents=True, exist_ok=True)
-    deleted_at = datetime.now().isoformat()
-    safe_deleted_at = deleted_at.replace(":", "-").replace(".", "-")
+    deleted_at = datetime.now()
+    safe_deleted_at = deleted_at.strftime("%Y%m%d%H%M%S")
     trash_item_dir = trash_dir / safe_deleted_at
     trash_item_dir.mkdir(parents=True, exist_ok=True)
     dst_path = trash_item_dir / abs_path.name
@@ -195,8 +195,7 @@ def clean_expired_trash(username: str) -> int:
         if not dated_dir.is_dir():
             continue
         try:
-            dir_name = dated_dir.name.replace("-", ":").replace("-", ".", 1)
-            deleted_at = datetime.fromisoformat(dir_name)
+            deleted_at = datetime.strptime(dated_dir.name, "%Y%m%d%H%M%S")
         except ValueError:
             deleted_at = datetime.fromtimestamp(dated_dir.stat().st_mtime)
         if now - deleted_at > expire_delta:
