@@ -117,7 +117,7 @@ def save_upload(rel_path: str, file_storage, username: str) -> Dict:
     return get_file_info(file_path, username)
 
 
-def create_share(rel_path: str, expire_hours: Optional[int] = None, password: Optional[str] = None) -> Dict:
+def create_share(rel_path: str, username: str, expire_hours: Optional[int] = None, password: Optional[str] = None) -> Dict:
     share_id = str(uuid.uuid4())[:12]
     expire_at = None
     if expire_hours:
@@ -128,6 +128,7 @@ def create_share(rel_path: str, expire_hours: Optional[int] = None, password: Op
     share_data = {
         "id": share_id,
         "path": rel_path,
+        "username": username,
         "expireAt": expire_at,
         "passwordHash": password_hash,
         "createdAt": datetime.now().isoformat(),

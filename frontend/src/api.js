@@ -73,7 +73,7 @@ export const api = {
     return `${API_BASE}/files/download?path=${encodeURIComponent(path)}&token=${token}`
   },
   createShare: (path, expireHours, password) => apiClient.post('/share', { path, expireHours, password }),
-  getShare: (shareId, password) => apiClient.post(`/share/${shareId}`, { password }),
+  getShare: (shareId, password) => axios.post(`${API_BASE}/share/${shareId}`, { password }),
   shareDownload: (shareId, password, subpath = '') => {
     let url = `${API_BASE}/share/${shareId}/download?password=${encodeURIComponent(password || '')}`
     if (subpath) {

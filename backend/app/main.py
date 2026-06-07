@@ -218,12 +218,13 @@ def create_app():
     @app.route("/api/share", methods=["POST"])
     @token_required
     def api_create_share():
+        username = g.user["username"]
         data = request.get_json()
         path = data.get("path", "")
         expire_hours = data.get("expireHours")
         password = data.get("password")
         try:
-            result = create_share(path, expire_hours, password)
+            result = create_share(path, username, expire_hours, password)
             return jsonify({"success": True, "share": result})
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 400
@@ -240,14 +241,17 @@ def create_app():
             share, error = get_share(share_id, password)
             if error:
                 return jsonify({"success": False, "error": error}), 400
-            abs_path = get_abs_path(share["path"])
+            username = share.get("username", "")
+            if not username:
+                return jsonify({"success": False, "error": "Invalid share data"}), 400
+            abs_path = get_abs_path(share["path"], username)
             if not abs_path.exists():
                 return jsonify({"success": False, "error": "File not found"}), 404
             if abs_path.is_file():
-                info = get_file_info(abs_path)
+                info = get_file_info(abs_path, username)
                 return jsonify({"success": True, "type": "file", "item": info})
             else:
-                items = list_directory(share["path"])
+                items = list_directory(share["path"], username)
                 return jsonify({"success": True, "type": "dir", "items": items, "path": share["path"]})
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 400
@@ -264,7 +268,10 @@ def create_app():
             share, error = get_share(share_id, password)
             if error:
                 return jsonify({"success": False, "error": error}), 400
-            base_path = get_abs_path(share["path"])
+            username = share.get("username", "")
+            if not username:
+                return jsonify({"success": False, "error": "Invalid share data"}), 400
+            base_path = get_abs_path(share["path"], username)
             if subpath:
                 subpath = subpath.lstrip("/")
                 abs_path = (base_path / subpath).resolve()
