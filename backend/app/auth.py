@@ -2,7 +2,7 @@ import json
 import uuid
 import bcrypt
 import jwt
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from functools import wraps
 from flask import request, jsonify, g
@@ -24,11 +24,12 @@ def verify_password(password: str, password_hash: str) -> bool:
 
 
 def generate_token(user_id: str, username: str) -> str:
+    now = datetime.now(timezone.utc)
     payload = {
         'user_id': user_id,
         'username': username,
-        'exp': datetime.utcnow() + timedelta(hours=Config.JWT_EXPIRE_HOURS),
-        'iat': datetime.utcnow()
+        'exp': now + timedelta(hours=Config.JWT_EXPIRE_HOURS),
+        'iat': now
     }
     return jwt.encode(payload, Config.JWT_SECRET_KEY, algorithm='HS256')
 
@@ -59,7 +60,7 @@ def create_user(username: str, password: str) -> dict:
         'id': user_id,
         'username': username,
         'password_hash': password_hash,
-        'created_at': datetime.utcnow().isoformat()
+        'created_at': datetime.now(timezone.utc).isoformat()
     }
     user_file = get_user_file_path(username)
     with open(user_file, 'w') as f:

@@ -8,28 +8,36 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from werkzeug.utils import secure_filename
 
-from .config import FILES_DIR, SHARES_DIR, USERS_DIR
+from .config import get_user_files_dir, SHARES_DIR, USERS_DIR, FILES_BASE_DIR
 
 
 def ensure_dirs():
-    FILES_DIR.mkdir(parents=True, exist_ok=True)
+    FILES_BASE_DIR.mkdir(parents=True, exist_ok=True)
     SHARES_DIR.mkdir(parents=True, exist_ok=True)
     USERS_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def get_abs_path(rel_path: str) -> Path:
+def get_user_files_dir_safe(username: str) -> Path:
+    user_dir = get_user_files_dir(username)
+    user_dir.mkdir(parents=True, exist_ok=True)
+    return user_dir
+
+
+def get_abs_path(rel_path: str, username: str) -> Path:
     rel_path = rel_path.lstrip("/")
-    abs_path = (FILES_DIR / rel_path).resolve()
-    if not str(abs_path).startswith(str(FILES_DIR.resolve())):
+    user_files_dir = get_user_files_dir_safe(username)
+    abs_path = (user_files_dir / rel_path).resolve()
+    if not str(abs_path).startswith(str(user_files_dir.resolve())):
         raise ValueError("Invalid path")
     return abs_path
 
 
-def get_file_info(path: Path) -> Dict:
+def get_file_info(path: Path, username: str) -> Dict:
+    user_files_dir = get_user_files_dir_safe(username)
     stat = path.stat()
     return {
         "name": path.name,
-        "path": str(path.relative_to(FILES_DIR)),
+        "path": str(path.relative_to(user_files_dir)),
         "isDir": path.is_dir(),
         "size": stat.st_size if path.is_file() else 0,
         "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
@@ -37,25 +45,25 @@ def get_file_info(path: Path) -> Dict:
     }
 
 
-def list_directory(rel_path: str) -> List[Dict]:
-    abs_path = get_abs_path(rel_path)
+def list_directory(rel_path: str, username: str) -> List[Dict]:
+    abs_path = get_abs_path(rel_path, username)
     if not abs_path.exists() or not abs_path.is_dir():
         return []
     items = []
     for item in abs_path.iterdir():
-        items.append(get_file_info(item))
+        items.append(get_file_info(item, username))
     items.sort(key=lambda x: (not x["isDir"], x["name"].lower()))
     return items
 
 
-def create_folder(rel_path: str, name: str) -> Dict:
-    abs_path = get_abs_path(rel_path) / secure_filename(name)
+def create_folder(rel_path: str, name: str, username: str) -> Dict:
+    abs_path = get_abs_path(rel_path, username) / secure_filename(name)
     abs_path.mkdir(parents=True, exist_ok=True)
-    return get_file_info(abs_path)
+    return get_file_info(abs_path, username)
 
 
-def delete_item(rel_path: str) -> bool:
-    abs_path = get_abs_path(rel_path)
+def delete_item(rel_path: str, username: str) -> bool:
+    abs_path = get_abs_path(rel_path, username)
     if not abs_path.exists():
         return False
     if abs_path.is_dir():
@@ -65,37 +73,37 @@ def delete_item(rel_path: str) -> bool:
     return True
 
 
-def rename_item(rel_path: str, new_name: str) -> Dict:
-    abs_path = get_abs_path(rel_path)
+def rename_item(rel_path: str, new_name: str, username: str) -> Dict:
+    abs_path = get_abs_path(rel_path, username)
     parent = abs_path.parent
     new_path = parent / secure_filename(new_name)
     abs_path.rename(new_path)
-    return get_file_info(new_path)
+    return get_file_info(new_path, username)
 
 
-def move_item(src_rel: str, dst_rel: str) -> Dict:
-    src_path = get_abs_path(src_rel)
-    dst_path = get_abs_path(dst_rel)
+def move_item(src_rel: str, dst_rel: str, username: str) -> Dict:
+    src_path = get_abs_path(src_rel, username)
+    dst_path = get_abs_path(dst_rel, username)
     if dst_path.is_dir():
         dst_path = dst_path / src_path.name
     shutil.move(str(src_path), str(dst_path))
-    return get_file_info(dst_path)
+    return get_file_info(dst_path, username)
 
 
-def copy_item(src_rel: str, dst_rel: str) -> Dict:
-    src_path = get_abs_path(src_rel)
-    dst_path = get_abs_path(dst_rel)
+def copy_item(src_rel: str, dst_rel: str, username: str) -> Dict:
+    src_path = get_abs_path(src_rel, username)
+    dst_path = get_abs_path(dst_rel, username)
     if dst_path.is_dir():
         dst_path = dst_path / src_path.name
     if src_path.is_dir():
         shutil.copytree(src_path, dst_path)
     else:
         shutil.copy2(src_path, dst_path)
-    return get_file_info(dst_path)
+    return get_file_info(dst_path, username)
 
 
-def save_upload(rel_path: str, file_storage) -> Dict:
-    abs_dir = get_abs_path(rel_path)
+def save_upload(rel_path: str, file_storage, username: str) -> Dict:
+    abs_dir = get_abs_path(rel_path, username)
     abs_dir.mkdir(parents=True, exist_ok=True)
     filename = secure_filename(file_storage.filename)
     file_path = abs_dir / filename
@@ -106,7 +114,7 @@ def save_upload(rel_path: str, file_storage) -> Dict:
         file_path = abs_dir / f"{stem}_{counter}{suffix}"
         counter += 1
     file_storage.save(str(file_path))
-    return get_file_info(file_path)
+    return get_file_info(file_path, username)
 
 
 def create_share(rel_path: str, expire_hours: Optional[int] = None, password: Optional[str] = None) -> Dict:
@@ -150,8 +158,8 @@ def get_share(share_id: str, password: Optional[str] = None) -> Tuple[Optional[D
     return share, None
 
 
-def search_files(query: str, extension: Optional[str] = None, path: str = "") -> List[Dict]:
-    abs_path = get_abs_path(path)
+def search_files(query: str, extension: Optional[str] = None, path: str = "", username: str = "") -> List[Dict]:
+    abs_path = get_abs_path(path, username)
     if not abs_path.exists() or not abs_path.is_dir():
         return []
     query = query.lower()
@@ -163,7 +171,7 @@ def search_files(query: str, extension: Optional[str] = None, path: str = "") ->
                     ext = f".{extension.lstrip('.').lower()}"
                     if item.is_file() and item.suffix.lower() != ext:
                         continue
-                results.append(get_file_info(item))
+                results.append(get_file_info(item, username))
         except (PermissionError, OSError):
             continue
     results.sort(key=lambda x: (not x["isDir"], x["name"].lower()))

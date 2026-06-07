@@ -68,9 +68,10 @@ def create_app():
     @app.route("/api/files", methods=["GET"])
     @token_required
     def api_list_files():
+        username = g.user["username"]
         path = request.args.get("path", "")
         try:
-            items = list_directory(path)
+            items = list_directory(path, username)
             return jsonify({"success": True, "items": items, "path": path})
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 400
@@ -78,13 +79,14 @@ def create_app():
     @app.route("/api/files/search", methods=["GET"])
     @token_required
     def api_search_files():
+        username = g.user["username"]
         query = request.args.get("q", "")
         extension = request.args.get("ext", None)
         path = request.args.get("path", "")
         if not query:
             return jsonify({"success": False, "error": "Search query is required"}), 400
         try:
-            items = search_files(query, extension, path)
+            items = search_files(query, extension, path, username)
             return jsonify({"success": True, "items": items, "query": query, "extension": extension})
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 400
@@ -92,6 +94,7 @@ def create_app():
     @app.route("/api/files/upload", methods=["POST"])
     @token_required
     def api_upload():
+        username = g.user["username"]
         path = request.form.get("path", "")
         if "file" not in request.files:
             return jsonify({"success": False, "error": "No file provided"}), 400
@@ -99,7 +102,7 @@ def create_app():
         if file.filename == "":
             return jsonify({"success": False, "error": "No filename"}), 400
         try:
-            info = save_upload(path, file)
+            info = save_upload(path, file, username)
             return jsonify({"success": True, "item": info})
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 400
@@ -107,13 +110,14 @@ def create_app():
     @app.route("/api/files/folder", methods=["POST"])
     @token_required
     def api_create_folder():
+        username = g.user["username"]
         data = request.get_json()
         path = data.get("path", "")
         name = data.get("name", "")
         if not name:
             return jsonify({"success": False, "error": "Name required"}), 400
         try:
-            info = create_folder(path, name)
+            info = create_folder(path, name, username)
             return jsonify({"success": True, "item": info})
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 400
@@ -121,10 +125,11 @@ def create_app():
     @app.route("/api/files/delete", methods=["POST"])
     @token_required
     def api_delete():
+        username = g.user["username"]
         data = request.get_json()
         path = data.get("path", "")
         try:
-            delete_item(path)
+            delete_item(path, username)
             return jsonify({"success": True})
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 400
@@ -132,13 +137,14 @@ def create_app():
     @app.route("/api/files/rename", methods=["POST"])
     @token_required
     def api_rename():
+        username = g.user["username"]
         data = request.get_json()
         path = data.get("path", "")
         newName = data.get("newName", "")
         if not newName:
             return jsonify({"success": False, "error": "New name required"}), 400
         try:
-            info = rename_item(path, newName)
+            info = rename_item(path, newName, username)
             return jsonify({"success": True, "item": info})
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 400
@@ -146,11 +152,12 @@ def create_app():
     @app.route("/api/files/move", methods=["POST"])
     @token_required
     def api_move():
+        username = g.user["username"]
         data = request.get_json()
         src = data.get("src", "")
         dst = data.get("dst", "")
         try:
-            info = move_item(src, dst)
+            info = move_item(src, dst, username)
             return jsonify({"success": True, "item": info})
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 400
@@ -158,11 +165,12 @@ def create_app():
     @app.route("/api/files/copy", methods=["POST"])
     @token_required
     def api_copy():
+        username = g.user["username"]
         data = request.get_json()
         src = data.get("src", "")
         dst = data.get("dst", "")
         try:
-            info = copy_item(src, dst)
+            info = copy_item(src, dst, username)
             return jsonify({"success": True, "item": info})
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 400
@@ -170,9 +178,10 @@ def create_app():
     @app.route("/api/files/preview", methods=["GET"])
     @token_required
     def api_preview():
+        username = g.user["username"]
         path = request.args.get("path", "")
         try:
-            abs_path = get_abs_path(path)
+            abs_path = get_abs_path(path, username)
             if not abs_path.exists() or not abs_path.is_file():
                 return jsonify({"success": False, "error": "File not found"}), 404
             ext = abs_path.suffix.lower()
@@ -193,9 +202,10 @@ def create_app():
     @app.route("/api/files/download", methods=["GET"])
     @token_required
     def api_download():
+        username = g.user["username"]
         path = request.args.get("path", "")
         try:
-            abs_path = get_abs_path(path)
+            abs_path = get_abs_path(path, username)
             if not abs_path.exists():
                 return jsonify({"success": False, "error": "Not found"}), 404
             if abs_path.is_file():
