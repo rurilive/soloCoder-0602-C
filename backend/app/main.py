@@ -2,6 +2,7 @@ import os
 import re
 from flask import Flask, request, jsonify, send_file, send_from_directory, Response, g
 from flask_cors import CORS
+from flask_socketio import SocketIO, join_room
 from pathlib import Path
 
 from .config import Config
@@ -38,18 +39,62 @@ from .auth import (
     authenticate_user,
     generate_token,
     token_required,
+    decode_token,
 )
+from .audit import (
+    start_audit_worker,
+    log_audit,
+    read_audit_logs,
+    ensure_audit_dir,
+)
+
+socketio = None
 
 
 def create_app():
+    global socketio
     app = Flask(__name__)
     app.config.from_object(Config)
-    CORS(app)
+    CORS(app, resources={r"/socket.io/*": {"origins": "*"}})
+    socketio = SocketIO(
+        app,
+        cors_allowed_origins="*",
+        async_mode="eventlet",
+        logger=False,
+        engineio_logger=False,
+    )
     ensure_dirs()
+    ensure_audit_dir()
+    start_audit_worker()
     try:
         clean_all_expired_trash()
     except Exception:
         pass
+
+    def emit_file_event(username, event_type, data=None):
+        if socketio:
+            socketio.emit(
+                "file_event",
+                {"type": event_type, "data": data or {}},
+                to=f"user:{username}",
+            )
+
+    @socketio.on("connect")
+    def on_connect():
+        token = None
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header.split(" ")[1]
+        if not token:
+            token = request.args.get("token")
+        if not token:
+            return False
+        try:
+            data = decode_token(token)
+            username = data["username"]
+            join_room(f"user:{username}")
+        except ValueError:
+            return False
 
     @app.route("/api/auth/register", methods=["POST"])
     def api_register():
@@ -133,6 +178,8 @@ def create_app():
                     "usage": usage
                 }), 403
             info = save_upload(path, file, username)
+            log_audit(username, "upload", info["path"])
+            emit_file_event(username, "upload", {"item": info, "path": path})
             return jsonify({"success": True, "item": info})
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 400
@@ -204,6 +251,8 @@ def create_app():
             if meta["username"] != username:
                 return jsonify({"success": False, "error": "Permission denied"}), 403
             info = complete_chunk_upload(upload_id, path, username)
+            log_audit(username, "upload", info["path"])
+            emit_file_event(username, "upload", {"item": info, "path": path})
             return jsonify({"success": True, "item": info})
         except ValueError as e:
             return jsonify({"success": False, "error": str(e)}), 400
@@ -221,6 +270,8 @@ def create_app():
             return jsonify({"success": False, "error": "Name required"}), 400
         try:
             info = create_folder(path, name, username)
+            log_audit(username, "create_folder", info["path"])
+            emit_file_event(username, "create_folder", {"item": info, "path": path})
             return jsonify({"success": True, "item": info})
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 400
@@ -233,6 +284,8 @@ def create_app():
         path = data.get("path", "")
         try:
             soft_delete_item(path, username)
+            log_audit(username, "delete", path)
+            emit_file_event(username, "delete", {"path": path})
             return jsonify({"success": True})
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 400
@@ -248,6 +301,8 @@ def create_app():
             return jsonify({"success": False, "error": "New name required"}), 400
         try:
             info = rename_item(path, newName, username)
+            log_audit(username, "rename", path, {"newPath": info["path"], "newName": newName})
+            emit_file_event(username, "rename", {"item": info, "oldPath": path})
             return jsonify({"success": True, "item": info})
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 400
@@ -261,6 +316,8 @@ def create_app():
         dst = data.get("dst", "")
         try:
             info = move_item(src, dst, username)
+            log_audit(username, "move", src, {"dst": dst, "newPath": info["path"]})
+            emit_file_event(username, "move", {"item": info, "src": src, "dst": dst})
             return jsonify({"success": True, "item": info})
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 400
@@ -287,6 +344,8 @@ def create_app():
                     "usage": usage
                 }), 403
             info = copy_item(src, dst, username)
+            log_audit(username, "copy", src, {"dst": dst, "newPath": info["path"]})
+            emit_file_event(username, "copy", {"item": info, "src": src, "dst": dst})
             return jsonify({"success": True, "item": info})
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 400
@@ -341,6 +400,7 @@ def create_app():
         password = data.get("password")
         try:
             result = create_share(path, username, expire_hours, password)
+            log_audit(username, "share", path, {"shareId": result["id"], "expireHours": expire_hours, "hasPassword": password is not None})
             return jsonify({"success": True, "share": result})
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 400
@@ -429,6 +489,8 @@ def create_app():
         path = data.get("path", "")
         try:
             item = restore_trash_item(path, username)
+            log_audit(username, "restore_trash", path, {"newPath": item["path"]})
+            emit_file_event(username, "restore_trash", {"item": item, "trashPath": path})
             return jsonify({"success": True, "item": item})
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 400
@@ -441,6 +503,7 @@ def create_app():
         path = data.get("path", "")
         try:
             permanently_delete_trash_item(path, username)
+            log_audit(username, "permanent_delete", path)
             return jsonify({"success": True})
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 400
@@ -451,7 +514,21 @@ def create_app():
         username = g.user["username"]
         try:
             empty_trash(username)
+            log_audit(username, "empty_trash", "")
             return jsonify({"success": True})
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)}), 400
+
+    @app.route("/api/audit", methods=["GET"])
+    @token_required
+    def api_get_audit_logs():
+        username = g.user["username"]
+        action_type = request.args.get("action")
+        page = int(request.args.get("page", 1))
+        per_page = int(request.args.get("perPage", 20))
+        try:
+            result = read_audit_logs(username, action_type, page, per_page)
+            return jsonify({"success": True, **result})
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 400
 
@@ -507,7 +584,7 @@ def create_app():
 
 def main():
     app = create_app()
-    app.run(host=Config.HOST, port=Config.PORT, debug=True)
+    socketio.run(app, host=Config.HOST, port=Config.PORT, debug=True)
 
 
 if __name__ == "__main__":

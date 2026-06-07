@@ -1,4 +1,5 @@
 import axios from 'axios'
+import { io } from 'socket.io-client'
 
 const API_BASE = '/api'
 
@@ -8,6 +9,24 @@ export const getToken = () => localStorage.getItem(TOKEN_KEY)
 export const setToken = (token) => localStorage.setItem(TOKEN_KEY, token)
 export const removeToken = () => localStorage.removeItem(TOKEN_KEY)
 export const isAuthenticated = () => !!getToken()
+
+export const createSocket = () => {
+  const token = getToken()
+  if (!token) return null
+  return io({
+    auth: {
+      token: token
+    },
+    query: {
+      token: token
+    },
+    transports: ['websocket', 'polling'],
+    reconnection: true,
+    reconnectionAttempts: Infinity,
+    reconnectionDelay: 1000,
+    reconnectionDelayMax: 5000,
+  })
+}
 
 const apiClient = axios.create({
   baseURL: API_BASE,
@@ -105,5 +124,13 @@ export const api = {
   restoreTrashItem: (path) => apiClient.post('/trash/restore', { path }),
   permanentlyDeleteTrashItem: (path) => apiClient.post('/trash/delete', { path }),
   emptyTrash: () => apiClient.post('/trash/empty'),
+
+  getAuditLogs: (page = 1, perPage = 20, actionType = '') => {
+    let url = `/audit?page=${page}&perPage=${perPage}`
+    if (actionType) {
+      url += `&action=${encodeURIComponent(actionType)}`
+    }
+    return apiClient.get(url)
+  },
 }
 

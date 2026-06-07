@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { api } from './api'
+import { api, createSocket } from './api'
 import { useNavigate } from 'react-router-dom'
 
 function formatSize(bytes) {
@@ -59,8 +59,16 @@ function App() {
   const [searchResults, setSearchResults] = useState([])
   const [isSearching, setIsSearching] = useState(false)
   const [storageUsage, setStorageUsage] = useState(null)
+  const [notification, setNotification] = useState(null)
+  const socketRef = useRef(null)
+  const currentPathRef = useRef(currentPath)
   const fileInputRef = useRef(null)
   const searchTimeoutRef = useRef(null)
+  const notificationTimeoutRef = useRef(null)
+
+  useEffect(() => {
+    currentPathRef.current = currentPath
+  }, [currentPath])
 
   const loadStorageUsage = async () => {
     try {
@@ -80,9 +88,71 @@ function App() {
     }).catch(() => setLoading(false))
   }
 
+  const showNotification = (message, type = 'info') => {
+    if (notificationTimeoutRef.current) {
+      clearTimeout(notificationTimeoutRef.current)
+    }
+    setNotification({ message, type })
+    notificationTimeoutRef.current = setTimeout(() => {
+      setNotification(null)
+    }, 3000)
+  }
+
+  const getActionMessage = (eventType, data) => {
+    const actionNames = {
+      upload: '上传了文件',
+      delete: '删除了文件',
+      rename: '重命名了文件',
+      move: '移动了文件',
+      copy: '复制了文件',
+      create_folder: '创建了文件夹',
+      restore_trash: '恢复了文件',
+    }
+    const itemName = data?.item?.name || data?.path || ''
+    return `${actionNames[eventType] || '操作了'}: ${itemName}`
+  }
+
   useEffect(() => {
     loadFiles('')
     loadStorageUsage()
+
+    const socket = createSocket()
+    if (socket) {
+      socketRef.current = socket
+
+      socket.on('connect', () => {
+        console.log('Socket connected')
+      })
+
+      socket.on('disconnect', () => {
+        console.log('Socket disconnected')
+      })
+
+      socket.on('file_event', (event) => {
+        const { type, data } = event
+        console.log('Received file event:', type, data)
+        loadFiles(currentPathRef.current)
+        loadStorageUsage()
+        const message = getActionMessage(type, data)
+        if (message) {
+          showNotification(message, 'info')
+        }
+      })
+
+      socket.on('connect_error', (err) => {
+        console.error('Socket connection error:', err)
+      })
+    }
+
+    return () => {
+      if (socketRef.current) {
+        socketRef.current.disconnect()
+        socketRef.current = null
+      }
+      if (notificationTimeoutRef.current) {
+        clearTimeout(notificationTimeoutRef.current)
+      }
+    }
   }, [])
 
   const handleSearch = (query, ext) => {
@@ -516,6 +586,7 @@ function App() {
             >📤 上传文件</button>
             <button className="btn btn-primary" onClick={() => setShowNewFolderModal(true)}>📁 新建文件夹</button>
             <button className="btn btn-secondary" onClick={() => navigate('/trash')}>🗑️ 回收站</button>
+            <button className="btn btn-secondary" onClick={() => navigate('/audit')}>📋 审计日志</button>
             <button className="btn btn-secondary" onClick={() => api.logout()}>🚪 退出</button>
           </div>
         </div>
@@ -784,6 +855,12 @@ function App() {
               <button className="btn btn-primary" onClick={() => window.open(api.downloadFile(selected?.path), '_blank')}>下载</button>
             </div>
           </div>
+        </div>
+      )}
+
+      {notification && (
+        <div className={`notification notification-${notification.type}`}>
+          {notification.message}
         </div>
       )}
     </div>
