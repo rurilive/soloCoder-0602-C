@@ -13,7 +13,17 @@ export const isAuthenticated = () => !!getToken()
 export const createSocket = () => {
   const token = getToken()
   if (!token) return null
-  return io({
+
+  const isDev = import.meta.env.DEV
+  let socketUrl
+  if (isDev) {
+    const host = window.location.hostname
+    socketUrl = `http://${host}:3331`
+  } else {
+    socketUrl = ''
+  }
+
+  return io(socketUrl, {
     auth: {
       token: token
     },

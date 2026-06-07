@@ -129,7 +129,7 @@ BACKEND_LOG="$SCRIPT_DIR/backend.log"
 FRONTEND_LOG="$SCRIPT_DIR/frontend.log"
 
 cd "$SCRIPT_DIR/backend"
-uv run python -m app.main > "$BACKEND_LOG" 2>&1 &
+uv run python -c "from app.main import create_app,socketio; app = create_app(); socketio.run(app, host='0.0.0.0', port=3331)" > "$BACKEND_LOG" 2>&1 &
 UV_PID=$!
 echo "⏳ 等待后端 Python 进程启动..."
 BACKEND_PID=$(find_child_pid "$UV_PID" "python")

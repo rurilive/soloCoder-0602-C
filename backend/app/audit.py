@@ -79,6 +79,89 @@ def log_audit(
     AUDIT_QUEUE.put(entry)
 
 
+def _count_total_lines(file_path: Path, action_type: Optional[str] = None) -> int:
+    count = 0
+    with open(file_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            if action_type:
+                try:
+                    entry = json.loads(line)
+                    if entry.get("action") != action_type:
+                        continue
+                except Exception:
+                    continue
+            count += 1
+    return count
+
+
+def _read_lines_reverse(
+    file_path: Path,
+    action_type: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 20,
+    block_size: int = 4096,
+) -> List[Dict]:
+    results = []
+    skipped = 0
+
+    with open(file_path, "rb") as f:
+        f.seek(0, 2)
+        file_size = f.tell()
+
+        if file_size == 0:
+            return []
+
+        buffer = b""
+        position = file_size
+
+        while position > 0 and len(results) < limit:
+            read_size = min(block_size, position)
+            position -= read_size
+            f.seek(position)
+            chunk = f.read(read_size)
+            buffer = chunk + buffer
+
+            lines = buffer.split(b"\n")
+            buffer = lines[0]
+
+            for line_bytes in reversed(lines[1:]):
+                if not line_bytes:
+                    continue
+                try:
+                    line = line_bytes.decode("utf-8").strip()
+                    if not line:
+                        continue
+                    entry = json.loads(line)
+                    if action_type and entry.get("action") != action_type:
+                        continue
+                    if skipped < skip:
+                        skipped += 1
+                        continue
+                    results.append(entry)
+                    if len(results) >= limit:
+                        break
+                except Exception:
+                    continue
+
+        if buffer and len(results) < limit:
+            try:
+                line = buffer.decode("utf-8").strip()
+                if line:
+                    entry = json.loads(line)
+                    if not action_type or entry.get("action") == action_type:
+                        if skipped < skip:
+                            skipped += 1
+                        else:
+                            results.append(entry)
+            except Exception:
+                pass
+
+    return results
+
+
 def read_audit_logs(
     username: str,
     action_type: Optional[str] = None,
@@ -90,25 +173,9 @@ def read_audit_logs(
     if not audit_file.exists():
         return {"items": [], "total": 0, "page": page, "perPage": per_page}
 
-    all_lines = []
-    with open(audit_file, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-                if action_type and entry.get("action") != action_type:
-                    continue
-                all_lines.append(entry)
-            except Exception:
-                continue
-
-    all_lines.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
-    total = len(all_lines)
-    start = (page - 1) * per_page
-    end = start + per_page
-    items = all_lines[start:end]
+    skip = (page - 1) * per_page
+    items = _read_lines_reverse(audit_file, action_type, skip, per_page)
+    total = _count_total_lines(audit_file, action_type)
 
     return {
         "items": items,
