@@ -48,21 +48,19 @@ from .audit import (
     ensure_audit_dir,
 )
 
-socketio = None
+socketio = SocketIO(
+    cors_allowed_origins="*",
+    async_mode="eventlet",
+    logger=False,
+    engineio_logger=False,
+)
 
 
 def create_app():
-    global socketio
     app = Flask(__name__)
     app.config.from_object(Config)
     CORS(app, resources={r"/socket.io/*": {"origins": "*"}})
-    socketio = SocketIO(
-        app,
-        cors_allowed_origins="*",
-        async_mode="eventlet",
-        logger=False,
-        engineio_logger=False,
-    )
+    socketio.init_app(app)
     ensure_dirs()
     ensure_audit_dir()
     start_audit_worker()

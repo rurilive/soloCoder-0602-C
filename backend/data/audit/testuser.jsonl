@@ -1,0 +1,4 @@
+{"timestamp": "2026-06-07T14:15:12.160586+00:00", "username": "testuser", "action": "create_folder", "path": "testfolder"}
+{"timestamp": "2026-06-07T14:15:12.205210+00:00", "username": "testuser", "action": "create_folder", "path": "docs"}
+{"timestamp": "2026-06-07T14:15:12.250459+00:00", "username": "testuser", "action": "create_folder", "path": "photos"}
+{"timestamp": "2026-06-07T14:15:12.297788+00:00", "username": "testuser", "action": "share", "path": "testfolder", "shareId": "b00d360f-eff", "expireHours": 24, "hasPassword": false}
