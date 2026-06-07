@@ -1,5 +1,6 @@
 import os
-from flask import Flask, request, jsonify, send_file, send_from_directory
+import re
+from flask import Flask, request, jsonify, send_file, send_from_directory, Response, g
 from flask_cors import CORS
 from pathlib import Path
 
@@ -27,6 +28,10 @@ from .utils import (
     check_storage_quota,
     clean_all_expired_trash,
     get_dir_size,
+    init_chunk_upload,
+    save_chunk,
+    complete_chunk_upload,
+    get_upload_meta,
 )
 from .auth import (
     create_user,
@@ -129,6 +134,79 @@ def create_app():
                 }), 403
             info = save_upload(path, file, username)
             return jsonify({"success": True, "item": info})
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)}), 400
+
+    @app.route("/api/files/upload/init", methods=["POST"])
+    @token_required
+    def api_upload_init():
+        username = g.user["username"]
+        data = request.get_json()
+        filename = data.get("filename", "")
+        total_size = data.get("totalSize", 0)
+        total_chunks = data.get("totalChunks", 0)
+        file_md5 = data.get("fileMD5", "")
+        if not filename or total_size <= 0 or total_chunks <= 0 or not file_md5:
+            return jsonify({"success": False, "error": "Missing required fields"}), 400
+        try:
+            check_storage_quota(username, total_size)
+        except ValueError as e:
+            usage = get_user_storage_usage(username)
+            return jsonify({
+                "success": False,
+                "error": str(e),
+                "usage": usage
+            }), 403
+        try:
+            meta = init_chunk_upload(filename, total_size, total_chunks, file_md5, username)
+            return jsonify({"success": True, "uploadId": meta["uploadId"]})
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)}), 400
+
+    @app.route("/api/files/upload/chunk", methods=["POST"])
+    @token_required
+    def api_upload_chunk():
+        username = g.user["username"]
+        upload_id = request.form.get("uploadId", "")
+        chunk_index = request.form.get("chunkIndex", "")
+        chunk_md5 = request.form.get("chunkMD5", "")
+        if not upload_id or chunk_index == "" or not chunk_md5:
+            return jsonify({"success": False, "error": "Missing required fields"}), 400
+        if "chunk" not in request.files:
+            return jsonify({"success": False, "error": "No chunk file provided"}), 400
+        try:
+            chunk_index = int(chunk_index)
+            meta = get_upload_meta(upload_id)
+            if not meta:
+                return jsonify({"success": False, "error": "Upload session not found"}), 404
+            if meta["username"] != username:
+                return jsonify({"success": False, "error": "Permission denied"}), 403
+            result = save_chunk(upload_id, chunk_index, request.files["chunk"], chunk_md5)
+            return jsonify({"success": True, **result})
+        except ValueError as e:
+            return jsonify({"success": False, "error": str(e)}), 400
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)}), 400
+
+    @app.route("/api/files/upload/complete", methods=["POST"])
+    @token_required
+    def api_upload_complete():
+        username = g.user["username"]
+        data = request.get_json()
+        upload_id = data.get("uploadId", "")
+        path = data.get("path", "")
+        if not upload_id:
+            return jsonify({"success": False, "error": "Missing uploadId"}), 400
+        try:
+            meta = get_upload_meta(upload_id)
+            if not meta:
+                return jsonify({"success": False, "error": "Upload session not found"}), 404
+            if meta["username"] != username:
+                return jsonify({"success": False, "error": "Permission denied"}), 403
+            info = complete_chunk_upload(upload_id, path, username)
+            return jsonify({"success": True, "item": info})
+        except ValueError as e:
+            return jsonify({"success": False, "error": str(e)}), 400
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 400
 
@@ -247,7 +325,7 @@ def create_app():
             if not abs_path.exists():
                 return jsonify({"success": False, "error": "Not found"}), 404
             if abs_path.is_file():
-                return send_file(str(abs_path), as_attachment=True, download_name=abs_path.name)
+                return stream_file(abs_path)
             else:
                 return jsonify({"success": False, "error": "Cannot download directory"}), 400
         except Exception as e:
@@ -319,7 +397,7 @@ def create_app():
                 abs_path = base_path
             if not abs_path.exists() or not abs_path.is_file():
                 return jsonify({"success": False, "error": "Not found"}), 404
-            return send_file(str(abs_path), as_attachment=True, download_name=abs_path.name)
+            return stream_file(abs_path)
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 400
 
@@ -376,6 +454,49 @@ def create_app():
             return jsonify({"success": True})
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 400
+
+    def stream_file(file_path: Path, chunk_size: int = 1024 * 1024):
+        file_size = file_path.stat().st_size
+        range_header = request.headers.get("Range")
+        start = 0
+        end = file_size - 1
+        status_code = 200
+        if range_header:
+            range_match = re.match(r"bytes=(\d*)-(\d*)", range_header)
+            if range_match:
+                start_str, end_str = range_match.groups()
+                if start_str:
+                    start = int(start_str)
+                if end_str:
+                    end = int(end_str)
+                start = max(0, min(start, file_size - 1))
+                end = max(start, min(end, file_size - 1))
+                status_code = 206
+        def generate():
+            with open(file_path, "rb") as f:
+                f.seek(start)
+                remaining = end - start + 1
+                while remaining > 0:
+                    read_size = min(chunk_size, remaining)
+                    data = f.read(read_size)
+                    if not data:
+                        break
+                    yield data
+                    remaining -= len(data)
+        headers = {
+            "Content-Disposition": f"attachment; filename={file_path.name.encode('utf-8').decode('latin-1')}",
+            "Content-Type": "application/octet-stream",
+            "Content-Length": str(end - start + 1),
+            "Accept-Ranges": "bytes",
+        }
+        if status_code == 206:
+            headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
+        return Response(
+            generate(),
+            status=status_code,
+            headers=headers,
+            direct_passthrough=True,
+        )
 
     @app.route("/api/health", methods=["GET"])
     def health():

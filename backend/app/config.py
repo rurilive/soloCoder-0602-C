@@ -6,9 +6,11 @@ DATA_DIR = BASE_DIR / "data"
 FILES_BASE_DIR = DATA_DIR / "files"
 SHARES_DIR = DATA_DIR / "shares"
 USERS_DIR = DATA_DIR / "users"
+TMP_DIR = DATA_DIR / "tmp"
 TRASH_DIR_NAME = ".trash"
 TRASH_EXPIRE_DAYS = 30
 DEFAULT_STORAGE_QUOTA = 500 * 1024 * 1024
+CHUNK_SIZE = 5 * 1024 * 1024
 
 def get_user_files_dir(username: str) -> Path:
     return FILES_BASE_DIR / username

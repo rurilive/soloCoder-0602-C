@@ -14,6 +14,7 @@ from .config import (
     SHARES_DIR,
     USERS_DIR,
     FILES_BASE_DIR,
+    TMP_DIR,
     TRASH_DIR_NAME,
     TRASH_EXPIRE_DAYS,
     DEFAULT_STORAGE_QUOTA,
@@ -24,6 +25,7 @@ def ensure_dirs():
     FILES_BASE_DIR.mkdir(parents=True, exist_ok=True)
     SHARES_DIR.mkdir(parents=True, exist_ok=True)
     USERS_DIR.mkdir(parents=True, exist_ok=True)
+    TMP_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def get_dir_size(path: Path) -> int:
@@ -376,3 +378,113 @@ def search_files(query: str, extension: Optional[str] = None, path: str = "", us
             continue
     results.sort(key=lambda x: (not x["isDir"], x["name"].lower()))
     return results
+
+
+def init_chunk_upload(filename: str, total_size: int, total_chunks: int, file_md5: str, username: str) -> Dict:
+    upload_id = str(uuid.uuid4())
+    upload_dir = TMP_DIR / upload_id
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    upload_meta = {
+        "uploadId": upload_id,
+        "filename": secure_filename(filename),
+        "totalSize": total_size,
+        "totalChunks": total_chunks,
+        "fileMD5": file_md5,
+        "username": username,
+        "createdAt": datetime.now().isoformat(),
+        "receivedChunks": [],
+    }
+    meta_file = upload_dir / "meta.json"
+    with open(meta_file, "w") as f:
+        json.dump(upload_meta, f)
+    return upload_meta
+
+
+def get_upload_meta(upload_id: str) -> Optional[Dict]:
+    upload_dir = TMP_DIR / upload_id
+    meta_file = upload_dir / "meta.json"
+    if not meta_file.exists():
+        return None
+    with open(meta_file, "r") as f:
+        return json.load(f)
+
+
+def save_chunk(upload_id: str, chunk_index: int, chunk_data, chunk_md5: str) -> Dict:
+    upload_dir = TMP_DIR / upload_id
+    if not upload_dir.exists():
+        raise ValueError("Upload session not found")
+    meta_file = upload_dir / "meta.json"
+    with open(meta_file, "r") as f:
+        meta = json.load(f)
+    chunk_file = upload_dir / f"chunk_{chunk_index}"
+    chunk_data.save(str(chunk_file))
+    calculated_md5 = hashlib.md5(chunk_file.read_bytes()).hexdigest()
+    if calculated_md5 != chunk_md5:
+        chunk_file.unlink()
+        raise ValueError(f"Chunk {chunk_index} MD5 mismatch")
+    if chunk_index not in meta["receivedChunks"]:
+        meta["receivedChunks"].append(chunk_index)
+        meta["receivedChunks"].sort()
+    with open(meta_file, "w") as f:
+        json.dump(meta, f)
+    return {"receivedChunks": meta["receivedChunks"], "totalChunks": meta["totalChunks"]}
+
+
+def complete_chunk_upload(upload_id: str, rel_path: str, username: str) -> Dict:
+    upload_dir = TMP_DIR / upload_id
+    if not upload_dir.exists():
+        raise ValueError("Upload session not found")
+    meta_file = upload_dir / "meta.json"
+    with open(meta_file, "r") as f:
+        meta = json.load(f)
+    if len(meta["receivedChunks"]) != meta["totalChunks"]:
+        missing = [i for i in range(meta["totalChunks"]) if i not in meta["receivedChunks"]]
+        raise ValueError(f"Missing chunks: {missing}")
+    abs_dir = get_abs_path(rel_path, username)
+    abs_dir.mkdir(parents=True, exist_ok=True)
+    filename = meta["filename"]
+    file_path = abs_dir / filename
+    counter = 1
+    while file_path.exists():
+        stem = Path(filename).stem
+        suffix = Path(filename).suffix
+        file_path = abs_dir / f"{stem}_{counter}{suffix}"
+        counter += 1
+    md5_hash = hashlib.md5()
+    with open(file_path, "wb") as outfile:
+        for i in range(meta["totalChunks"]):
+            chunk_file = upload_dir / f"chunk_{i}"
+            chunk_data = chunk_file.read_bytes()
+            md5_hash.update(chunk_data)
+            outfile.write(chunk_data)
+    calculated_md5 = md5_hash.hexdigest()
+    if calculated_md5 != meta["fileMD5"]:
+        file_path.unlink()
+        raise ValueError(f"File MD5 mismatch. Expected: {meta['fileMD5']}, Got: {calculated_md5}")
+    shutil.rmtree(upload_dir)
+    return get_file_info(file_path, username)
+
+
+def cleanup_expired_uploads(max_age_hours: int = 24) -> int:
+    if not TMP_DIR.exists():
+        return 0
+    now = datetime.now()
+    cleaned_count = 0
+    for upload_dir in TMP_DIR.iterdir():
+        if not upload_dir.is_dir():
+            continue
+        meta_file = upload_dir / "meta.json"
+        try:
+            if meta_file.exists():
+                with open(meta_file, "r") as f:
+                    meta = json.load(f)
+                created_at = datetime.fromisoformat(meta["createdAt"])
+                if now - created_at > timedelta(hours=max_age_hours):
+                    shutil.rmtree(upload_dir)
+                    cleaned_count += 1
+            else:
+                shutil.rmtree(upload_dir)
+                cleaned_count += 1
+        except Exception:
+            continue
+    return cleaned_count

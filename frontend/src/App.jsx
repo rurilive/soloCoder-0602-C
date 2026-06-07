@@ -51,6 +51,8 @@ function App() {
   const [sharePassword, setSharePassword] = useState('')
   const [shareResult, setShareResult] = useState(null)
   const [uploadProgress, setUploadProgress] = useState(0)
+  const [chunkProgress, setChunkProgress] = useState({})
+  const [uploadingFile, setUploadingFile] = useState(null)
   const [contextMenu, setContextMenu] = useState(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [searchExt, setSearchExt] = useState('')
@@ -106,6 +108,214 @@ function App() {
     handleSearch(searchQuery, searchExt)
   }, [searchQuery, searchExt])
 
+  const CHUNK_SIZE = 5 * 1024 * 1024
+  const MAX_RETRY = 3
+
+  const calculateMD5 = async (blob) => {
+    const arrayBuffer = await blob.arrayBuffer()
+    const hashBuffer = await crypto.subtle.digest('MD5', arrayBuffer)
+    const hashArray = Array.from(new Uint8Array(hashBuffer))
+    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('')
+  }
+
+  const calculateFileMD5 = async (file, onProgress) => {
+    const chunks = Math.ceil(file.size / CHUNK_SIZE)
+    if (file.size <= CHUNK_SIZE) {
+      onProgress?.(100)
+      return await calculateMD5(file)
+    }
+    let md5 = null
+    for (let i = 0; i < chunks; i++) {
+      const start = i * CHUNK_SIZE
+      const end = Math.min(start + CHUNK_SIZE, file.size)
+      const chunk = file.slice(start, end)
+      const chunkBuffer = await chunk.arrayBuffer()
+      if (i === 0) {
+        md5 = new Md5()
+      }
+      md5.append(chunkBuffer)
+      onProgress?.(Math.round(((i + 1) / chunks) * 100))
+    }
+    return md5.end()
+  }
+
+  class Md5 {
+    constructor() {
+      this.buf = new ArrayBuffer(64)
+      this.buf8 = new Uint8Array(this.buf)
+      this.buf32 = new Uint32Array(this.buf)
+      this.bufLen = 0
+      this.bytesLen = 0
+      this.h0 = 0x67452301
+      this.h1 = 0xefcdab89
+      this.h2 = 0x98badcfe
+      this.h3 = 0x10325476
+    }
+    append(data) {
+      const view = new Uint8Array(data)
+      let pos = 0
+      while (pos < view.length) {
+        const len = Math.min(64 - this.bufLen, view.length - pos)
+        this.buf8.set(view.subarray(pos, pos + len), this.bufLen)
+        this.bufLen += len
+        pos += len
+        this.bytesLen += len
+        if (this.bufLen === 64) {
+          this._process()
+          this.bufLen = 0
+        }
+      }
+      return this
+    }
+    end() {
+      const bitLen = this.bytesLen * 8
+      this.buf8[this.bufLen++] = 0x80
+      if (this.bufLen > 56) {
+        while (this.bufLen < 64) this.buf8[this.bufLen++] = 0
+        this._process()
+        this.bufLen = 0
+      }
+      while (this.bufLen < 56) this.buf8[this.bufLen++] = 0
+      this.buf32[14] = bitLen & 0xffffffff
+      this.buf32[15] = Math.floor(bitLen / 0x100000000)
+      this._process()
+      const toHex = (n) => {
+        let hex = ''
+        for (let i = 0; i < 4; i++) {
+          hex += ((n >> (i * 8)) & 0xff).toString(16).padStart(2, '0')
+        }
+        return hex
+      }
+      return toHex(this.h0) + toHex(this.h1) + toHex(this.h2) + toHex(this.h3)
+    }
+    _process() {
+      const K = [
+        0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee,
+        0xf57c0faf, 0x4787c62a, 0xa8304613, 0xfd469501,
+        0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be,
+        0x6b901122, 0xfd987193, 0xa679438e, 0x49b40821,
+        0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa,
+        0xd62f105d, 0x02441453, 0xd8a1e681, 0xe7d3fbc8,
+        0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed,
+        0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a,
+        0xfffa3942, 0x8771f681, 0x6d9d6122, 0xfde5380c,
+        0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70,
+        0x289b7ec6, 0xeaa127fa, 0xd4ef3085, 0x04881d05,
+        0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665,
+        0xf4292244, 0x432aff97, 0xab9423a7, 0xfc93a039,
+        0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
+        0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1,
+        0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391,
+      ]
+      const S = [
+        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
+        5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
+        4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+        6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+      ]
+      const M = new Uint32Array(16)
+      for (let i = 0; i < 16; i++) {
+        M[i] = this.buf32[i]
+      }
+      let a = this.h0, b = this.h1, c = this.h2, d = this.h3
+      const rotl = (x, n) => (x << n) | (x >>> (32 - n))
+      for (let i = 0; i < 64; i++) {
+        let f, g
+        if (i < 16) {
+          f = (b & c) | ((~b) & d)
+          g = i
+        } else if (i < 32) {
+          f = (d & b) | ((~d) & c)
+          g = (5 * i + 1) % 16
+        } else if (i < 48) {
+          f = b ^ c ^ d
+          g = (3 * i + 5) % 16
+        } else {
+          f = c ^ (b | (~d))
+          g = (7 * i) % 16
+        }
+        f = (f + a + K[i] + M[g]) & 0xffffffff
+        a = d
+        d = c
+        c = b
+        b = (b + rotl(f, S[i])) & 0xffffffff
+      }
+      this.h0 = (this.h0 + a) & 0xffffffff
+      this.h1 = (this.h1 + b) & 0xffffffff
+      this.h2 = (this.h2 + c) & 0xffffffff
+      this.h3 = (this.h3 + d) & 0xffffffff
+    }
+  }
+
+  const uploadChunkWithRetry = async (uploadId, chunkIndex, chunk, chunkMD5) => {
+    let lastError = null
+    for (let attempt = 0; attempt < MAX_RETRY; attempt++) {
+      try {
+        const res = await api.uploadChunk(uploadId, chunkIndex, chunk, chunkMD5, (idx, p) => {
+          setChunkProgress(prev => ({ ...prev, [idx]: p }))
+        })
+        return res.data
+      } catch (e) {
+        lastError = e
+        if (attempt < MAX_RETRY - 1) {
+          await new Promise(r => setTimeout(r, 1000 * (attempt + 1)))
+        }
+      }
+    }
+    throw lastError
+  }
+
+  const handleChunkedUpload = async (file) => {
+    try {
+      setUploadingFile(file.name)
+      setUploadProgress(0)
+      setChunkProgress({})
+
+      const totalChunks = Math.ceil(file.size / CHUNK_SIZE)
+      const fileMD5 = await calculateFileMD5(file, (p) => setUploadProgress(Math.round(p * 0.2)))
+
+      const initRes = await api.uploadInit(file.name, file.size, totalChunks, fileMD5)
+      const uploadId = initRes.data.uploadId
+
+      const chunkMD5s = []
+      for (let i = 0; i < totalChunks; i++) {
+        const start = i * CHUNK_SIZE
+        const end = Math.min(start + CHUNK_SIZE, file.size)
+        const chunk = file.slice(start, end)
+        const md5 = await calculateMD5(chunk)
+        chunkMD5s.push(md5)
+      }
+
+      let uploadedChunks = 0
+      const concurrency = 3
+      let index = 0
+      const workers = []
+      for (let w = 0; w < concurrency && index < totalChunks; w++) {
+        const worker = (async () => {
+          while (index < totalChunks) {
+            const currentIndex = index++
+            const start = currentIndex * CHUNK_SIZE
+            const end = Math.min(start + CHUNK_SIZE, file.size)
+            const chunk = file.slice(start, end)
+            await uploadChunkWithRetry(uploadId, currentIndex, chunk, chunkMD5s[currentIndex])
+            uploadedChunks++
+            setUploadProgress(20 + Math.round((uploadedChunks / totalChunks) * 75))
+          }
+        })()
+        workers.push(worker)
+      }
+      await Promise.all(workers)
+
+      setUploadProgress(95)
+      const completeRes = await api.uploadComplete(uploadId, currentPath)
+      setUploadProgress(100)
+
+      return completeRes.data
+    } catch (e) {
+      throw e
+    }
+  }
+
   const navigateTo = (path) => {
     loadFiles(path)
     setSelected(null)
@@ -115,18 +325,33 @@ function App() {
     const file = e.target.files[0]
     if (!file) return
     setUploadProgress(0)
-    api.uploadFile(currentPath, file, (p) => setUploadProgress(p)).then(() => {
+    setChunkProgress({})
+    setUploadingFile(file.name)
+
+    const useChunked = file.size > CHUNK_SIZE
+
+    const uploadPromise = useChunked
+      ? handleChunkedUpload(file)
+      : api.uploadFile(currentPath, file, (p) => setUploadProgress(p))
+
+    uploadPromise.then(() => {
       setShowUploadModal(false)
       loadFiles()
       loadStorageUsage()
       setUploadProgress(0)
+      setChunkProgress({})
+      setUploadingFile(null)
       if (fileInputRef.current) fileInputRef.current.value = ''
     }).catch((e) => {
         if (e.response?.status === 403) {
           alert('存储空间不足，请删除一些文件或清理回收站后再试')
           loadStorageUsage()
+        } else {
+          alert('上传失败: ' + (e.response?.data?.error || e.message))
         }
         setUploadProgress(0)
+        setChunkProgress({})
+        setUploadingFile(null)
         if (fileInputRef.current) fileInputRef.current.value = ''
       })
   }
@@ -412,9 +637,45 @@ function App() {
           <div className="modal" onClick={e => e.stopPropagation()}>
             <h3>上传文件</h3>
             <input type="file" ref={fileInputRef} onChange={handleUpload} />
+            {uploadingFile && (
+              <div style={{ marginTop: '10px', fontSize: '13px', color: '#666' }}>
+                正在上传: {uploadingFile}
+              </div>
+            )}
             {uploadProgress > 0 && (
-              <div className="upload-progress">
-                <div className="upload-progress-bar" style={{ width: `${uploadProgress}%` }}></div>
+              <>
+                <div className="upload-progress">
+                  <div className="upload-progress-bar" style={{ width: `${uploadProgress}%` }}></div>
+                </div>
+                <div style={{ textAlign: 'center', fontSize: '12px', color: '#666', marginTop: '5px' }}>
+                  {uploadProgress}%
+                </div>
+              </>
+            )}
+            {Object.keys(chunkProgress).length > 0 && (
+              <div style={{ marginTop: '10px', maxHeight: '150px', overflowY: 'auto' }}>
+                <div style={{ fontSize: '12px', color: '#666', marginBottom: '5px' }}>分片进度:</div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                  {Object.entries(chunkProgress).sort((a, b) => parseInt(a[0]) - parseInt(b[0])).map(([idx, p]) => (
+                    <div
+                      key={idx}
+                      style={{
+                        width: '20px',
+                        height: '20px',
+                        borderRadius: '3px',
+                        backgroundColor: p === 100 ? '#4caf50' : p > 0 ? '#2196f3' : '#e0e0e0',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        fontSize: '10px',
+                        color: '#fff',
+                      }}
+                      title={`分片 ${parseInt(idx) + 1}: ${p}%`}
+                    >
+                      {p === 100 ? '✓' : parseInt(idx) + 1}
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
             <div className="modal-actions">

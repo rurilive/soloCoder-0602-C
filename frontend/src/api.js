@@ -61,6 +61,23 @@ export const api = {
       onUploadProgress: (e) => onProgress?.(Math.round((e.loaded * 100) / e.total))
     })
   },
+
+  uploadInit: (filename, totalSize, totalChunks, fileMD5) =>
+    apiClient.post('/files/upload/init', { filename, totalSize, totalChunks, fileMD5 }),
+
+  uploadChunk: (uploadId, chunkIndex, chunk, chunkMD5, onProgress) => {
+    const form = new FormData()
+    form.append('uploadId', uploadId)
+    form.append('chunkIndex', chunkIndex)
+    form.append('chunkMD5', chunkMD5)
+    form.append('chunk', chunk)
+    return apiClient.post('/files/upload/chunk', form, {
+      onUploadProgress: (e) => onProgress?.(chunkIndex, Math.round((e.loaded * 100) / e.total))
+    })
+  },
+
+  uploadComplete: (uploadId, path) =>
+    apiClient.post('/files/upload/complete', { uploadId, path }),
   createFolder: (path, name) => apiClient.post('/files/folder', { path, name }),
   deleteItem: (path) => apiClient.post('/files/delete', { path }),
   renameItem: (path, newName) => apiClient.post('/files/rename', { path, newName }),
