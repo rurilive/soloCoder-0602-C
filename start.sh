@@ -126,7 +126,7 @@ echo "按 Ctrl+C 停止所有服务，或运行 ./stop.sh"
 echo ""
 
 cd "$SCRIPT_DIR/backend"
-setsid uv run python -m app.main > /dev/null 2>&1 &
+uv run python -m app.main > /dev/null 2>&1 &
 UV_PID=$!
 echo "⏳ 等待后端 Python 进程启动..."
 BACKEND_PID=$(find_child_pid "$UV_PID" "python")
@@ -138,7 +138,7 @@ echo "$BACKEND_PID" > "$BACKEND_PID_FILE"
 echo "✅ 后端已启动 (PID: $BACKEND_PID)"
 
 cd "$SCRIPT_DIR/frontend"
-setsid npm run dev > /dev/null 2>&1 &
+npm run dev > /dev/null 2>&1 &
 NPM_PID=$!
 echo "⏳ 等待前端 Node 进程启动..."
 FRONTEND_PID=$(find_child_pid "$NPM_PID" "node")
@@ -151,4 +151,21 @@ echo "✅ 前端已启动 (PID: $FRONTEND_PID)"
 
 echo ""
 echo "服务运行中..."
-wait
+
+while true; do
+    if [ -f "$BACKEND_PID_FILE" ]; then
+        BPID=$(cat "$BACKEND_PID_FILE")
+        if ! kill -0 "$BPID" 2>/dev/null; then
+            echo "⚠️  后端进程已退出"
+            break
+        fi
+    fi
+    if [ -f "$FRONTEND_PID_FILE" ]; then
+        FPID=$(cat "$FRONTEND_PID_FILE")
+        if ! kill -0 "$FPID" 2>/dev/null; then
+            echo "⚠️  前端进程已退出"
+            break
+        fi
+    fi
+    sleep 2
+done

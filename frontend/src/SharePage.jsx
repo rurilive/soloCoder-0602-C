@@ -50,9 +50,33 @@ export default function SharePage() {
     loadShare(password)
   }
 
-  const handleDownload = (subpath = '') => {
-    const url = api.shareDownload(shareId, password, subpath)
-    window.open(url, '_blank')
+  const handleDownload = async (subpath = '') => {
+    try {
+      const url = `${import.meta.env.VITE_API_BASE || '/api'}/share/${shareId}/download`
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ password, subpath }),
+      })
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.error || '下载失败')
+      }
+      const blob = await response.blob()
+      const downloadUrl = window.URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = downloadUrl
+      const filename = subpath ? subpath.split('/').pop() : (shareData?.item?.name || 'download')
+      link.download = filename
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+      window.URL.revokeObjectURL(downloadUrl)
+    } catch (err) {
+      alert(err.message || '下载失败')
+    }
   }
 
   if (loading) {
