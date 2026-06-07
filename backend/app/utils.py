@@ -8,13 +8,211 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from werkzeug.utils import secure_filename
 
-from .config import get_user_files_dir, SHARES_DIR, USERS_DIR, FILES_BASE_DIR
+from .config import (
+    get_user_files_dir,
+    get_user_trash_dir,
+    SHARES_DIR,
+    USERS_DIR,
+    FILES_BASE_DIR,
+    TRASH_DIR_NAME,
+    TRASH_EXPIRE_DAYS,
+    DEFAULT_STORAGE_QUOTA,
+)
 
 
 def ensure_dirs():
     FILES_BASE_DIR.mkdir(parents=True, exist_ok=True)
     SHARES_DIR.mkdir(parents=True, exist_ok=True)
     USERS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def get_dir_size(path: Path) -> int:
+    total = 0
+    if not path.exists():
+        return 0
+    if path.is_file():
+        return path.stat().st_size
+    for item in path.rglob("*"):
+        try:
+            if item.is_file():
+                total += item.stat().st_size
+        except (PermissionError, OSError):
+            continue
+    return total
+
+
+def get_user_storage_usage(username: str) -> dict:
+    user_dir = get_user_files_dir_safe(username)
+    trash_dir = get_user_trash_dir(username)
+    total_size = get_dir_size(user_dir)
+    trash_size = get_dir_size(trash_dir) if trash_dir.exists() else 0
+    used_size = total_size - trash_size
+    return {
+        "used": used_size,
+        "trash": trash_size,
+        "total": total_size,
+        "quota": DEFAULT_STORAGE_QUOTA,
+        "remaining": max(0, DEFAULT_STORAGE_QUOTA - used_size),
+    }
+
+
+def check_storage_quota(username: str, required_size: int = 0) -> dict:
+    usage = get_user_storage_usage(username)
+    if usage["used"] + required_size > usage["quota"]:
+        raise ValueError(
+            f"存储空间不足，剩余 {usage['remaining']} 字节，需要 {required_size} 字节"
+        )
+    return usage
+
+
+def get_trash_item_info(path: Path, username: str) -> Dict:
+    user_files_dir = get_user_files_dir_safe(username)
+    trash_dir = get_user_trash_dir(username)
+    stat = path.stat()
+    trash_rel_path = str(path.relative_to(trash_dir))
+    parts = trash_rel_path.split("/")
+    deleted_at_str = parts[0]
+    original_path = "/".join(parts[1:])
+    try:
+        deleted_at = datetime.fromisoformat(deleted_at_str)
+    except ValueError:
+        deleted_at = datetime.fromtimestamp(stat.st_mtime)
+    return {
+        "name": path.name,
+        "path": trash_rel_path,
+        "originalPath": original_path,
+        "isDir": path.is_dir(),
+        "size": stat.st_size if path.is_file() else get_dir_size(path),
+        "deletedAt": deleted_at.isoformat(),
+        "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+        "extension": path.suffix.lower() if path.is_file() else "",
+    }
+
+
+def soft_delete_item(rel_path: str, username: str) -> bool:
+    abs_path = get_abs_path(rel_path, username)
+    if not abs_path.exists():
+        return False
+    trash_dir = get_user_trash_dir(username)
+    trash_dir.mkdir(parents=True, exist_ok=True)
+    deleted_at = datetime.now().isoformat()
+    safe_deleted_at = deleted_at.replace(":", "-").replace(".", "-")
+    trash_item_dir = trash_dir / safe_deleted_at
+    trash_item_dir.mkdir(parents=True, exist_ok=True)
+    dst_path = trash_item_dir / abs_path.name
+    counter = 1
+    base_name = abs_path.name
+    while dst_path.exists():
+        stem = Path(base_name).stem
+        suffix = Path(base_name).suffix
+        dst_path = trash_item_dir / f"{stem}_{counter}{suffix}"
+        counter += 1
+    shutil.move(str(abs_path), str(dst_path))
+    return True
+
+
+def list_trash(username: str) -> List[Dict]:
+    trash_dir = get_user_trash_dir(username)
+    if not trash_dir.exists() or not trash_dir.is_dir():
+        return []
+    items = []
+    for dated_dir in trash_dir.iterdir():
+        if not dated_dir.is_dir():
+            continue
+        for item in dated_dir.iterdir():
+            try:
+                items.append(get_trash_item_info(item, username))
+            except Exception:
+                continue
+    items.sort(key=lambda x: x["deletedAt"], reverse=True)
+    return items
+
+
+def restore_trash_item(trash_rel_path: str, username: str) -> Dict:
+    trash_dir = get_user_trash_dir(username)
+    abs_path = (trash_dir / trash_rel_path).resolve()
+    if not str(abs_path).startswith(str(trash_dir.resolve())):
+        raise ValueError("Invalid trash path")
+    if not abs_path.exists():
+        raise ValueError("Item not found in trash")
+    parts = trash_rel_path.split("/")
+    original_path = "/".join(parts[1:])
+    user_files_dir = get_user_files_dir_safe(username)
+    dst_path = user_files_dir / original_path
+    if dst_path.exists():
+        stem = dst_path.stem
+        suffix = dst_path.suffix
+        parent = dst_path.parent
+        counter = 1
+        while dst_path.exists():
+            dst_path = parent / f"{stem}_restored{counter}{suffix}"
+            counter += 1
+    dst_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(abs_path), str(dst_path))
+    dated_dir = abs_path.parent
+    if not any(dated_dir.iterdir()):
+        dated_dir.rmdir()
+    return get_file_info(dst_path, username)
+
+
+def permanently_delete_trash_item(trash_rel_path: str, username: str) -> bool:
+    trash_dir = get_user_trash_dir(username)
+    abs_path = (trash_dir / trash_rel_path).resolve()
+    if not str(abs_path).startswith(str(trash_dir.resolve())):
+        raise ValueError("Invalid trash path")
+    if not abs_path.exists():
+        return False
+    if abs_path.is_dir():
+        shutil.rmtree(abs_path)
+    else:
+        abs_path.unlink()
+    dated_dir = abs_path.parent
+    if dated_dir.exists() and not any(dated_dir.iterdir()):
+        dated_dir.rmdir()
+    return True
+
+
+def empty_trash(username: str) -> bool:
+    trash_dir = get_user_trash_dir(username)
+    if not trash_dir.exists():
+        return True
+    for item in trash_dir.iterdir():
+        if item.is_dir():
+            shutil.rmtree(item)
+        else:
+            item.unlink()
+    return True
+
+
+def clean_expired_trash(username: str) -> int:
+    trash_dir = get_user_trash_dir(username)
+    if not trash_dir.exists() or not trash_dir.is_dir():
+        return 0
+    now = datetime.now()
+    expire_delta = timedelta(days=TRASH_EXPIRE_DAYS)
+    cleaned_count = 0
+    for dated_dir in trash_dir.iterdir():
+        if not dated_dir.is_dir():
+            continue
+        try:
+            dir_name = dated_dir.name.replace("-", ":").replace("-", ".", 1)
+            deleted_at = datetime.fromisoformat(dir_name)
+        except ValueError:
+            deleted_at = datetime.fromtimestamp(dated_dir.stat().st_mtime)
+        if now - deleted_at > expire_delta:
+            shutil.rmtree(dated_dir)
+            cleaned_count += 1
+    return cleaned_count
+
+
+def clean_all_expired_trash() -> int:
+    if not FILES_BASE_DIR.exists():
+        return 0
+    total_cleaned = 0
+    for user_dir in FILES_BASE_DIR.iterdir():
+        if user_dir.is_dir():
+            total_cleaned += clean_expired_trash(user_dir.name)
+    return total_cleaned
 
 
 def get_user_files_dir_safe(username: str) -> Path:
@@ -51,6 +249,8 @@ def list_directory(rel_path: str, username: str) -> List[Dict]:
         return []
     items = []
     for item in abs_path.iterdir():
+        if item.name == TRASH_DIR_NAME:
+            continue
         items.append(get_file_info(item, username))
     items.sort(key=lambda x: (not x["isDir"], x["name"].lower()))
     return items

@@ -81,5 +81,12 @@ export const api = {
     }
     return url
   },
+
+  getStorageUsage: () => apiClient.get('/storage/usage'),
+
+  listTrash: () => apiClient.get('/trash'),
+  restoreTrashItem: (path) => apiClient.post('/trash/restore', { path }),
+  permanentlyDeleteTrashItem: (path) => apiClient.post('/trash/delete', { path }),
+  emptyTrash: () => apiClient.post('/trash/empty'),
 }
 

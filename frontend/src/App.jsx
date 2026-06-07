@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { api } from './api'
+import { useNavigate } from 'react-router-dom'
 
 function formatSize(bytes) {
   if (bytes === 0) return '0 B'
@@ -31,6 +32,7 @@ function getIconEmoji(item) {
 }
 
 function App() {
+  const navigate = useNavigate()
   const [currentPath, setCurrentPath] = useState('')
   const [files, setFiles] = useState([])
   const [selected, setSelected] = useState(null)
@@ -54,8 +56,18 @@ function App() {
   const [searchExt, setSearchExt] = useState('')
   const [searchResults, setSearchResults] = useState([])
   const [isSearching, setIsSearching] = useState(false)
+  const [storageUsage, setStorageUsage] = useState(null)
   const fileInputRef = useRef(null)
   const searchTimeoutRef = useRef(null)
+
+  const loadStorageUsage = async () => {
+    try {
+      const res = await api.getStorageUsage()
+      setStorageUsage(res.data.usage)
+    } catch (e) {
+      setStorageUsage(null)
+    }
+  }
 
   const loadFiles = async (path = currentPath) => {
     setLoading(true)
@@ -68,6 +80,7 @@ function App() {
 
   useEffect(() => {
     loadFiles('')
+    loadStorageUsage()
   }, [])
 
   const handleSearch = (query, ext) => {
@@ -105,9 +118,17 @@ function App() {
     api.uploadFile(currentPath, file, (p) => setUploadProgress(p)).then(() => {
       setShowUploadModal(false)
       loadFiles()
+      loadStorageUsage()
       setUploadProgress(0)
       if (fileInputRef.current) fileInputRef.current.value = ''
-    })
+    }).catch((e) => {
+        if (e.response?.status === 403) {
+          alert('存储空间不足，请删除一些文件或清理回收站后再试')
+          loadStorageUsage()
+        }
+        setUploadProgress(0)
+        if (fileInputRef.current) fileInputRef.current.value = ''
+      })
   }
 
   const handleCreateFolder = () => {
@@ -131,10 +152,11 @@ function App() {
 
   const handleDelete = () => {
     if (!selected) return
-    if (!confirm(`确定要删除 "${selected.name}" 吗？`)) return
+    if (!confirm(`确定要删除 "${selected.name}" 吗？文件将移到回收站，30天后自动清理。`)) return
     api.deleteItem(selected.path).then(() => {
       setSelected(null)
       loadFiles()
+      loadStorageUsage()
     })
   }
 
@@ -154,8 +176,16 @@ function App() {
     api.copyItem(selected.path, target).then(() => {
       setSelected(null)
       loadFiles()
+      loadStorageUsage()
       alert('复制完成')
-    })
+    }).catch((e) => {
+        if (e.response?.status === 403) {
+          alert('存储空间不足，无法复制文件')
+          loadStorageUsage()
+        } else {
+          alert('复制失败: ' + (e.response?.data?.error || e.message))
+        }
+      })
   }
 
   const handlePreview = async (item) => {
@@ -230,14 +260,39 @@ function App() {
     setSearchExt('')
   }
 
+  const isQuotaFull = storageUsage && storageUsage.remaining <= 0
+  const usagePercent = storageUsage ? Math.min(100, (storageUsage.used / storageUsage.quota) * 100) : 0
+
   return (
     <div className="app">
       <header className="header">
         <h1>☁️ 私有云文件管理</h1>
-        <div className="actions">
-          <button className="btn btn-primary" onClick={() => setShowUploadModal(true)}>📤 上传文件</button>
-          <button className="btn btn-primary" onClick={() => setShowNewFolderModal(true)}>📁 新建文件夹</button>
-          <button className="btn btn-secondary" onClick={() => api.logout()}>🚪 退出</button>
+        <div className="header-right">
+          {storageUsage && (
+            <div className="storage-quota">
+              <div className="storage-info">
+                <span>已用: {formatSize(storageUsage.used)} / {formatSize(storageUsage.quota)}</span>
+                {isQuotaFull && <span className="quota-warning"> (空间不足)</span>}
+              </div>
+              <div className="storage-progress-bar">
+                <div
+                  className={`storage-progress-fill ${isQuotaFull ? 'full' : ''}`}
+                  style={{ width: `${usagePercent}%` }}
+                ></div>
+              </div>
+            </div>
+          )}
+          <div className="actions">
+            <button
+              className={`btn btn-primary ${isQuotaFull ? 'btn-disabled' : ''}`}
+              onClick={() => !isQuotaFull && setShowUploadModal(true)}
+              disabled={isQuotaFull}
+              title={isQuotaFull ? '存储空间不足，请先清理文件' : ''}
+            >📤 上传文件</button>
+            <button className="btn btn-primary" onClick={() => setShowNewFolderModal(true)}>📁 新建文件夹</button>
+            <button className="btn btn-secondary" onClick={() => navigate('/trash')}>🗑️ 回收站</button>
+            <button className="btn btn-secondary" onClick={() => api.logout()}>🚪 退出</button>
+          </div>
         </div>
       </header>
 

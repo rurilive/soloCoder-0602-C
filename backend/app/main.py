@@ -18,6 +18,15 @@ from .utils import (
     get_share,
     get_file_info,
     search_files,
+    soft_delete_item,
+    list_trash,
+    restore_trash_item,
+    permanently_delete_trash_item,
+    empty_trash,
+    get_user_storage_usage,
+    check_storage_quota,
+    clean_all_expired_trash,
+    get_dir_size,
 )
 from .auth import (
     create_user,
@@ -32,6 +41,10 @@ def create_app():
     app.config.from_object(Config)
     CORS(app)
     ensure_dirs()
+    try:
+        clean_all_expired_trash()
+    except Exception:
+        pass
 
     @app.route("/api/auth/register", methods=["POST"])
     def api_register():
@@ -102,6 +115,18 @@ def create_app():
         if file.filename == "":
             return jsonify({"success": False, "error": "No filename"}), 400
         try:
+            file.seek(0, 2)
+            file_size = file.tell()
+            file.seek(0)
+            try:
+                check_storage_quota(username, file_size)
+            except ValueError as e:
+                usage = get_user_storage_usage(username)
+                return jsonify({
+                    "success": False,
+                    "error": str(e),
+                    "usage": usage
+                }), 403
             info = save_upload(path, file, username)
             return jsonify({"success": True, "item": info})
         except Exception as e:
@@ -129,7 +154,7 @@ def create_app():
         data = request.get_json()
         path = data.get("path", "")
         try:
-            delete_item(path, username)
+            soft_delete_item(path, username)
             return jsonify({"success": True})
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 400
@@ -170,6 +195,19 @@ def create_app():
         src = data.get("src", "")
         dst = data.get("dst", "")
         try:
+            src_path = get_abs_path(src, username)
+            if not src_path.exists():
+                raise ValueError("Source not found")
+            copy_size = get_dir_size(src_path)
+            try:
+                check_storage_quota(username, copy_size)
+            except ValueError as e:
+                usage = get_user_storage_usage(username)
+                return jsonify({
+                    "success": False,
+                    "error": str(e),
+                    "usage": usage
+                }), 403
             info = copy_item(src, dst, username)
             return jsonify({"success": True, "item": info})
         except Exception as e:
@@ -282,6 +320,60 @@ def create_app():
             if not abs_path.exists() or not abs_path.is_file():
                 return jsonify({"success": False, "error": "Not found"}), 404
             return send_file(str(abs_path), as_attachment=True, download_name=abs_path.name)
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)}), 400
+
+    @app.route("/api/storage/usage", methods=["GET"])
+    @token_required
+    def api_storage_usage():
+        username = g.user["username"]
+        try:
+            usage = get_user_storage_usage(username)
+            return jsonify({"success": True, "usage": usage})
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)}), 400
+
+    @app.route("/api/trash", methods=["GET"])
+    @token_required
+    def api_list_trash():
+        username = g.user["username"]
+        try:
+            items = list_trash(username)
+            return jsonify({"success": True, "items": items})
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)}), 400
+
+    @app.route("/api/trash/restore", methods=["POST"])
+    @token_required
+    def api_restore_trash():
+        username = g.user["username"]
+        data = request.get_json()
+        path = data.get("path", "")
+        try:
+            item = restore_trash_item(path, username)
+            return jsonify({"success": True, "item": item})
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)}), 400
+
+    @app.route("/api/trash/delete", methods=["POST"])
+    @token_required
+    def api_permanent_delete():
+        username = g.user["username"]
+        data = request.get_json()
+        path = data.get("path", "")
+        try:
+            permanently_delete_trash_item(path, username)
+            return jsonify({"success": True})
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)}), 400
+
+    @app.route("/api/trash/empty", methods=["POST"])
+    @token_required
+    def api_empty_trash():
+        username = g.user["username"]
+        try:
+            empty_trash(username)
+            return jsonify({"success": True})
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 400
 
