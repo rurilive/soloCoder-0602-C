@@ -125,8 +125,11 @@ echo ""
 echo "按 Ctrl+C 停止所有服务，或运行 ./stop.sh"
 echo ""
 
+BACKEND_LOG="$SCRIPT_DIR/backend.log"
+FRONTEND_LOG="$SCRIPT_DIR/frontend.log"
+
 cd "$SCRIPT_DIR/backend"
-uv run python -m app.main > /dev/null 2>&1 &
+uv run python -m app.main > "$BACKEND_LOG" 2>&1 &
 UV_PID=$!
 echo "⏳ 等待后端 Python 进程启动..."
 BACKEND_PID=$(find_child_pid "$UV_PID" "python")
@@ -135,10 +138,10 @@ if [ -z "$BACKEND_PID" ]; then
     BACKEND_PID=$UV_PID
 fi
 echo "$BACKEND_PID" > "$BACKEND_PID_FILE"
-echo "✅ 后端已启动 (PID: $BACKEND_PID)"
+echo "✅ 后端已启动 (PID: $BACKEND_PID, 日志: $BACKEND_LOG)"
 
 cd "$SCRIPT_DIR/frontend"
-npm run dev > /dev/null 2>&1 &
+npm run dev > "$FRONTEND_LOG" 2>&1 &
 NPM_PID=$!
 echo "⏳ 等待前端 Node 进程启动..."
 FRONTEND_PID=$(find_child_pid "$NPM_PID" "node")
@@ -147,7 +150,7 @@ if [ -z "$FRONTEND_PID" ]; then
     FRONTEND_PID=$NPM_PID
 fi
 echo "$FRONTEND_PID" > "$FRONTEND_PID_FILE"
-echo "✅ 前端已启动 (PID: $FRONTEND_PID)"
+echo "✅ 前端已启动 (PID: $FRONTEND_PID, 日志: $FRONTEND_LOG)"
 
 echo ""
 echo "服务运行中..."
@@ -156,16 +159,20 @@ while true; do
     if [ -f "$BACKEND_PID_FILE" ]; then
         BPID=$(cat "$BACKEND_PID_FILE")
         if ! kill -0 "$BPID" 2>/dev/null; then
-            echo "⚠️  后端进程已退出"
-            break
+            echo "⚠️  后端进程已退出 (PID: $BPID)，查看日志: $BACKEND_LOG"
+            rm -f "$BACKEND_PID_FILE"
         fi
     fi
     if [ -f "$FRONTEND_PID_FILE" ]; then
         FPID=$(cat "$FRONTEND_PID_FILE")
         if ! kill -0 "$FPID" 2>/dev/null; then
-            echo "⚠️  前端进程已退出"
-            break
+            echo "⚠️  前端进程已退出 (PID: $FPID)，查看日志: $FRONTEND_LOG"
+            rm -f "$FRONTEND_PID_FILE"
         fi
+    fi
+    if [ ! -f "$BACKEND_PID_FILE" ] && [ ! -f "$FRONTEND_PID_FILE" ]; then
+        echo "所有服务已停止"
+        break
     fi
     sleep 2
 done

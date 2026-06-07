@@ -52,7 +52,7 @@ export default function SharePage() {
 
   const handleDownload = async (subpath = '') => {
     try {
-      const url = `${import.meta.env.VITE_API_BASE || '/api'}/share/${shareId}/download`
+      const url = `/api/share/${shareId}/download`
       const response = await fetch(url, {
         method: 'POST',
         headers: {
