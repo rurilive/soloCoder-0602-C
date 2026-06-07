@@ -56,6 +56,33 @@ socketio = SocketIO(
 )
 
 
+def emit_file_event(username, event_type, data=None):
+    if socketio:
+        socketio.emit(
+            "file_event",
+            {"type": event_type, "data": data or {}},
+            to=f"user:{username}",
+        )
+
+
+@socketio.on("connect")
+def on_connect():
+    token = None
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        token = auth_header.split(" ")[1]
+    if not token:
+        token = request.args.get("token")
+    if not token:
+        return False
+    try:
+        data = decode_token(token)
+        username = data["username"]
+        join_room(f"user:{username}")
+    except ValueError:
+        return False
+
+
 def create_app():
     app = Flask(__name__)
     app.config.from_object(Config)
@@ -68,31 +95,6 @@ def create_app():
         clean_all_expired_trash()
     except Exception:
         pass
-
-    def emit_file_event(username, event_type, data=None):
-        if socketio:
-            socketio.emit(
-                "file_event",
-                {"type": event_type, "data": data or {}},
-                to=f"user:{username}",
-            )
-
-    @socketio.on("connect")
-    def on_connect():
-        token = None
-        auth_header = request.headers.get("Authorization")
-        if auth_header and auth_header.startswith("Bearer "):
-            token = auth_header.split(" ")[1]
-        if not token:
-            token = request.args.get("token")
-        if not token:
-            return False
-        try:
-            data = decode_token(token)
-            username = data["username"]
-            join_room(f"user:{username}")
-        except ValueError:
-            return False
 
     @app.route("/api/auth/register", methods=["POST"])
     def api_register():
