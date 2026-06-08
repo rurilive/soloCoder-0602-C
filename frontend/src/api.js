@@ -82,6 +82,10 @@ export const api = {
     }
     return apiClient.get(url)
   },
+
+  getFileTree: (path = '') => apiClient.get(`/files/tree?path=${encodeURIComponent(path)}`),
+  batchDelete: (paths) => apiClient.post('/files/batch-delete', { paths }),
+  batchMove: (sources, dst) => apiClient.post('/files/batch-move', { sources, dst }),
   uploadFile: (path, file, onProgress) => {
     const form = new FormData()
     form.append('path', path)

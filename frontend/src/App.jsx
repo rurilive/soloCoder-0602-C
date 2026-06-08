@@ -31,6 +31,128 @@ function getIconEmoji(item) {
   return '📄'
 }
 
+function DirectoryTreeSelector({ excludePaths, onSelect, onCancel }) {
+  const [treeData, setTreeData] = useState({})
+  const [expandedPaths, setExpandedPaths] = useState(new Set(['']))
+  const [selectedPath, setSelectedPath] = useState(null)
+  const [loadingPaths, setLoadingPaths] = useState(new Set())
+
+  const loadTree = async (path) => {
+    if (treeData[path]) return
+    setLoadingPaths(prev => new Set(prev).add(path))
+    try {
+      const res = await api.getFileTree(path)
+      setTreeData(prev => ({ ...prev, [path]: res.data.items || [] }))
+    } catch (e) {
+      setTreeData(prev => ({ ...prev, [path]: [] }))
+    }
+    setLoadingPaths(prev => { const next = new Set(prev); next.delete(path); return next })
+  }
+
+  useEffect(() => {
+    loadTree('')
+  }, [])
+
+  const toggleExpand = (path) => {
+    setExpandedPaths(prev => {
+      const next = new Set(prev)
+      if (next.has(path)) {
+        next.delete(path)
+      } else {
+        next.add(path)
+        loadTree(path)
+      }
+      return next
+    })
+  }
+
+  const isExcluded = (path) => {
+    if (!excludePaths || excludePaths.length === 0) return false
+    return excludePaths.some(src => {
+      if (path === src) return true
+      if (path.startsWith(src + '/')) return true
+      return false
+    })
+  }
+
+  const handleConfirm = () => {
+    if (selectedPath !== null) {
+      onSelect(selectedPath)
+    }
+  }
+
+  const renderTree = (path, depth = 0) => {
+    const items = treeData[path] || []
+    const isLoading = loadingPaths.has(path)
+
+    return (
+      <div key={path || 'root'}>
+        {items.map(item => {
+          const excluded = isExcluded(item.path)
+          const isSelected = selectedPath === item.path
+          const hasChildren = item.hasChildren
+          const isItemExpanded = expandedPaths.has(item.path)
+
+          return (
+            <div key={item.path}>
+              <div
+                className={`tree-item ${isSelected ? 'tree-item-selected' : ''} ${excluded ? 'tree-item-disabled' : ''}`}
+                style={{ paddingLeft: `${depth * 20 + 12}px` }}
+                onClick={() => !excluded && setSelectedPath(item.path)}
+              >
+                <span
+                  className="tree-toggle"
+                  onClick={(e) => { e.stopPropagation(); hasChildren && toggleExpand(item.path) }}
+                >
+                  {hasChildren ? (isItemExpanded ? '▼' : '▶') : ''}
+                </span>
+                <span className="tree-icon">📁</span>
+                <span className="tree-name">{item.name}</span>
+                {excluded && <span className="tree-excluded-label">（源路径）</span>}
+              </div>
+              {isItemExpanded && renderTree(item.path, depth + 1)}
+            </div>
+          )
+        })}
+        {isLoading && (
+          <div style={{ paddingLeft: `${depth * 20 + 32}px`, color: '#999', fontSize: '13px', padding: '4px 0' }}>
+            加载中...
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  return (
+    <div className="modal-overlay" onClick={onCancel}>
+      <div className="modal tree-selector-modal" onClick={e => e.stopPropagation()}>
+        <h3>选择目标文件夹</h3>
+        <div className="tree-selector-body">
+          <div
+            className={`tree-item ${selectedPath === '' ? 'tree-item-selected' : ''}`}
+            style={{ paddingLeft: '12px' }}
+            onClick={() => setSelectedPath('')}
+          >
+            <span className="tree-toggle"></span>
+            <span className="tree-icon">🏠</span>
+            <span className="tree-name">根目录</span>
+          </div>
+          {renderTree('', 0)}
+        </div>
+        {selectedPath !== null && (
+          <div className="tree-selected-path">
+            已选择: /{selectedPath || '（根目录）'}
+          </div>
+        )}
+        <div className="modal-actions">
+          <button className="btn btn-secondary" onClick={onCancel}>取消</button>
+          <button className="btn btn-primary" onClick={handleConfirm} disabled={selectedPath === null}>确定</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function App() {
   const navigate = useNavigate()
   const [currentPath, setCurrentPath] = useState('')
@@ -40,13 +162,11 @@ function App() {
   const [showUploadModal, setShowUploadModal] = useState(false)
   const [showNewFolderModal, setShowNewFolderModal] = useState(false)
   const [showRenameModal, setShowRenameModal] = useState(false)
-  const [showMoveModal, setShowMoveModal] = useState(false)
   const [showShareModal, setShowShareModal] = useState(false)
   const [showPreview, setShowPreview] = useState(false)
   const [previewData, setPreviewData] = useState(null)
   const [newFolderName, setNewFolderName] = useState('')
   const [renameValue, setRenameValue] = useState('')
-  const [moveTarget, setMoveTarget] = useState('')
   const [shareExpire, setShareExpire] = useState('')
   const [sharePassword, setSharePassword] = useState('')
   const [shareResult, setShareResult] = useState(null)
@@ -61,6 +181,11 @@ function App() {
   const [storageUsage, setStorageUsage] = useState(null)
   const [notification, setNotification] = useState(null)
   const [favorites, setFavorites] = useState(new Set())
+  const [selectedPaths, setSelectedPaths] = useState(new Set())
+  const [batchProgress, setBatchProgress] = useState(null)
+  const [showTreeSelector, setShowTreeSelector] = useState(false)
+  const [treeSelectorMode, setTreeSelectorMode] = useState('move')
+  const [treeSelectorSources, setTreeSelectorSources] = useState([])
   const socketRef = useRef(null)
   const currentPathRef = useRef(currentPath)
   const fileInputRef = useRef(null)
@@ -108,6 +233,7 @@ function App() {
 
   const loadFiles = async (path = currentPath) => {
     setLoading(true)
+    setSelectedPaths(new Set())
     api.listFiles(path).then(res => {
       setFiles(res.data.items || [])
       setCurrentPath(path)
@@ -421,6 +547,7 @@ function App() {
   const navigateTo = (path) => {
     loadFiles(path)
     setSelected(null)
+    setSelectedPaths(new Set())
   }
 
   const handleUpload = (e) => {
@@ -482,37 +609,133 @@ function App() {
     if (!confirm(`确定要删除 "${selected.name}" 吗？文件将移到回收站，30天后自动清理。`)) return
     api.deleteItem(selected.path).then(() => {
       setSelected(null)
+      setSelectedPaths(new Set())
       loadFiles()
       loadStorageUsage()
     })
   }
 
+  const handleBatchDelete = async () => {
+    const paths = Array.from(selectedPaths)
+    if (paths.length === 0) return
+    if (!confirm(`确定要删除选中的 ${paths.length} 个项目吗？文件将移到回收站，30天后自动清理。`)) return
+    setBatchProgress({ current: 0, total: paths.length, action: '删除' })
+    let successCount = 0
+    let failCount = 0
+    for (let i = 0; i < paths.length; i++) {
+      try {
+        await api.deleteItem(paths[i])
+        successCount++
+      } catch (e) {
+        failCount++
+      }
+      setBatchProgress({ current: i + 1, total: paths.length, action: '删除' })
+    }
+    setBatchProgress(null)
+    setSelectedPaths(new Set())
+    setSelected(null)
+    loadFiles()
+    loadStorageUsage()
+    showNotification(`批量删除完成: 成功 ${successCount} 个${failCount > 0 ? `，失败 ${failCount} 个` : ''}`, failCount > 0 ? 'error' : 'success')
+  }
+
   const handleMove = () => {
-    if (!selected || !moveTarget) return
-    api.moveItem(selected.path, moveTarget).then(() => {
-      setShowMoveModal(false)
-      setMoveTarget('')
-      setSelected(null)
-      loadFiles()
-    })
+    if (!selected) return
+    setTreeSelectorSources([selected.path])
+    setTreeSelectorMode('move')
+    setShowTreeSelector(true)
+  }
+
+  const handleBatchMove = () => {
+    const paths = Array.from(selectedPaths)
+    if (paths.length === 0) return
+    setTreeSelectorSources(paths)
+    setTreeSelectorMode('move')
+    setShowTreeSelector(true)
+  }
+
+  const handleTreeSelect = async (targetPath) => {
+    setShowTreeSelector(false)
+
+    if (treeSelectorMode === 'move') {
+      if (treeSelectorSources.length === 1) {
+        api.moveItem(treeSelectorSources[0], targetPath).then(() => {
+          setSelected(null)
+          setSelectedPaths(new Set())
+          loadFiles()
+        }).catch(e => {
+          alert('移动失败: ' + (e.response?.data?.error || e.message))
+        })
+      } else {
+        const paths = treeSelectorSources
+        setBatchProgress({ current: 0, total: paths.length, action: '移动' })
+        let successCount = 0
+        let failCount = 0
+        for (let i = 0; i < paths.length; i++) {
+          try {
+            await api.moveItem(paths[i], targetPath)
+            successCount++
+          } catch (e) {
+            failCount++
+          }
+          setBatchProgress({ current: i + 1, total: paths.length, action: '移动' })
+        }
+        setBatchProgress(null)
+        setSelectedPaths(new Set())
+        setSelected(null)
+        loadFiles()
+        showNotification(`批量移动完成: 成功 ${successCount} 个${failCount > 0 ? `，失败 ${failCount} 个` : ''}`, failCount > 0 ? 'error' : 'success')
+      }
+    } else {
+      if (treeSelectorSources.length === 1) {
+        api.copyItem(treeSelectorSources[0], targetPath).then(() => {
+          setSelected(null)
+          loadFiles()
+          loadStorageUsage()
+          showNotification('复制完成', 'success')
+        }).catch(e => {
+          if (e.response?.status === 403) {
+            alert('存储空间不足，无法复制文件')
+            loadStorageUsage()
+          } else {
+            alert('复制失败: ' + (e.response?.data?.error || e.message))
+          }
+        })
+      }
+    }
   }
 
   const handleCopy = () => {
     if (!selected) return
-    const target = prompt('请输入目标路径（留空为当前目录）：') || currentPath
-    api.copyItem(selected.path, target).then(() => {
-      setSelected(null)
-      loadFiles()
-      loadStorageUsage()
-      alert('复制完成')
-    }).catch((e) => {
-        if (e.response?.status === 403) {
-          alert('存储空间不足，无法复制文件')
-          loadStorageUsage()
-        } else {
-          alert('复制失败: ' + (e.response?.data?.error || e.message))
-        }
-      })
+    setTreeSelectorSources([selected.path])
+    setTreeSelectorMode('copy')
+    setShowTreeSelector(true)
+  }
+
+  const toggleSelectPath = (path, e) => {
+    if (e) e.stopPropagation()
+    setSelectedPaths(prev => {
+      const next = new Set(prev)
+      if (next.has(path)) {
+        next.delete(path)
+      } else {
+        next.add(path)
+      }
+      return next
+    })
+  }
+
+  const toggleSelectAll = () => {
+    if (selectedPaths.size === displayFiles.length && displayFiles.length > 0) {
+      setSelectedPaths(new Set())
+    } else {
+      setSelectedPaths(new Set(displayFiles.map(f => f.path)))
+    }
+  }
+
+  const exitBatchMode = () => {
+    setSelectedPaths(new Set())
+    setSelected(null)
   }
 
   const handlePreview = async (item) => {
@@ -578,7 +801,6 @@ function App() {
   }, [])
 
   const pathParts = currentPath ? currentPath.split('/').filter(Boolean) : []
-  const image_exts = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg']
 
   const displayFiles = isSearching ? searchResults : files
 
@@ -674,21 +896,43 @@ function App() {
         </div>
 
         <div className="toolbar">
-          {selected && !isSearching && (
+          {selectedPaths.size > 0 && !isSearching && (
+            <>
+              <span className="batch-count">已选 {selectedPaths.size} 项</span>
+              <button className="btn btn-danger btn-small" onClick={handleBatchDelete}>🗑️ 批量删除</button>
+              <button className="btn btn-secondary btn-small" onClick={handleBatchMove}>📋 批量移动</button>
+              <button className="btn btn-secondary btn-small" onClick={exitBatchMode}>✕ 取消选择</button>
+            </>
+          )}
+          {selectedPaths.size === 0 && selected && !isSearching && (
             <>
               <button className="btn btn-secondary btn-small" onClick={() => handlePreview(selected)}>👁️ 预览</button>
               <button className="btn btn-secondary btn-small" onClick={() => { setRenameValue(selected.name); setShowRenameModal(true) }}>✏️ 重命名</button>
-              <button className="btn btn-secondary btn-small" onClick={() => setShowMoveModal(true)}>📋 移动</button>
+              <button className="btn btn-secondary btn-small" onClick={handleMove}>📋 移动</button>
               <button className="btn btn-secondary btn-small" onClick={handleCopy}>📄 复制</button>
               <button className="btn btn-secondary btn-small" onClick={handleShare}>🔗 分享</button>
               <button className="btn btn-danger btn-small" onClick={handleDelete}>🗑️ 删除</button>
             </>
           )}
           {isSearching && <span style={{ color: '#999', fontSize: '13px' }}>找到 {searchResults.length} 个结果</span>}
-          {!selected && !isSearching && <span style={{ color: '#999', fontSize: '13px' }}>选择文件或文件夹进行操作</span>}
+          {!selected && selectedPaths.size === 0 && !isSearching && <span style={{ color: '#999', fontSize: '13px' }}>选择文件或文件夹进行操作</span>}
         </div>
 
         <div className="file-list">
+          {!isSearching && displayFiles.length > 0 && (
+            <div className="file-list-header">
+              <input
+                type="checkbox"
+                className="file-checkbox"
+                checked={selectedPaths.size === displayFiles.length && displayFiles.length > 0}
+                onChange={toggleSelectAll}
+              />
+              <span className="header-name">名称</span>
+              <span className="header-size">大小</span>
+              <span className="header-date">修改时间</span>
+              <span className="header-actions">操作</span>
+            </div>
+          )}
           {loading && <div className="empty-state"><div className="icon">⏳</div>加载中...</div>}
           {!loading && isSearching && searchResults.length === 0 && (
             <div className="empty-state">
@@ -705,11 +949,18 @@ function App() {
           {displayFiles.map(item => (
             <div
               key={item.path}
-              className={`file-item ${selected?.path === item.path ? 'selected' : ''}`}
-              onClick={() => setSelected(item)}
+              className={`file-item ${selected?.path === item.path ? 'selected' : ''} ${selectedPaths.has(item.path) ? 'batch-selected' : ''}`}
+              onClick={() => { setSelected(item); setSelectedPaths(new Set()) }}
               onDoubleClick={() => handlePreview(item)}
               onContextMenu={(e) => handleContextMenu(e, item)}
             >
+              <input
+                type="checkbox"
+                className="file-checkbox"
+                checked={selectedPaths.has(item.path)}
+                onChange={(e) => toggleSelectPath(item.path, e)}
+                onClick={(e) => e.stopPropagation()}
+              />
               <div className={`icon ${getIconClass(item)}`}>{getIconEmoji(item)}</div>
               <div className="name">{item.name}</div>
               <div className="size">{item.isDir ? '-' : formatSize(item.size)}</div>
@@ -732,7 +983,7 @@ function App() {
         <div className="context-menu" style={{ left: contextMenu.x, top: contextMenu.y }}>
           <div className="context-menu-item" onClick={() => { handlePreview(selected); setContextMenu(null) }}>👁️ 打开/预览</div>
           <div className="context-menu-item" onClick={() => { setRenameValue(selected?.name || ''); setShowRenameModal(true); setContextMenu(null) }}>✏️ 重命名</div>
-          <div className="context-menu-item" onClick={() => { setShowMoveModal(true); setContextMenu(null) }}>📋 移动</div>
+          <div className="context-menu-item" onClick={() => { handleMove(); setContextMenu(null) }}>📋 移动</div>
           <div className="context-menu-item" onClick={() => { handleCopy(); setContextMenu(null) }}>📄 复制</div>
           <div className="context-menu-item" onClick={() => { window.open(api.downloadFile(selected?.path), '_blank'); setContextMenu(null) }}>⬇️ 下载</div>
           <div className="context-menu-item" onClick={() => { handleShare(); setContextMenu(null) }}>🔗 分享</div>
@@ -827,17 +1078,23 @@ function App() {
         </div>
       )}
 
-      {showMoveModal && (
-        <div className="modal-overlay" onClick={() => setShowMoveModal(false)}>
-          <div className="modal" onClick={e => e.stopPropagation()}>
-            <h3>移动到</h3>
-            <div className="form-group">
-              <label>目标路径</label>
-              <input value={moveTarget} onChange={e => setMoveTarget(e.target.value)} placeholder="例如: folder/subfolder" />
+      {showTreeSelector && (
+        <DirectoryTreeSelector
+          excludePaths={treeSelectorSources}
+          onSelect={handleTreeSelect}
+          onCancel={() => setShowTreeSelector(false)}
+        />
+      )}
+
+      {batchProgress && (
+        <div className="modal-overlay">
+          <div className="modal">
+            <h3>批量{batchProgress.action}中</h3>
+            <div className="upload-progress">
+              <div className="upload-progress-bar" style={{ width: `${(batchProgress.current / batchProgress.total) * 100}%` }}></div>
             </div>
-            <div className="modal-actions">
-              <button className="btn btn-secondary" onClick={() => setShowMoveModal(false)}>取消</button>
-              <button className="btn btn-primary" onClick={handleMove}>移动</button>
+            <div style={{ textAlign: 'center', fontSize: '13px', color: '#666', marginTop: '8px' }}>
+              {batchProgress.current} / {batchProgress.total}
             </div>
           </div>
         </div>

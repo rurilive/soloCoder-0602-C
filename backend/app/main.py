@@ -33,6 +33,7 @@ from .utils import (
     save_chunk,
     complete_chunk_upload,
     get_upload_meta,
+    list_directory_tree,
 )
 from .auth import (
     create_user,
@@ -170,6 +171,58 @@ def create_app():
             return jsonify({"success": True, "items": items, "query": query, "extension": extension})
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 400
+
+    @app.route("/api/files/tree", methods=["GET"])
+    @token_required
+    def api_file_tree():
+        username = g.user["username"]
+        path = request.args.get("path", "")
+        try:
+            items = list_directory_tree(path, username)
+            return jsonify({"success": True, "items": items, "path": path})
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)}), 400
+
+    @app.route("/api/files/batch-delete", methods=["POST"])
+    @token_required
+    def api_batch_delete():
+        username = g.user["username"]
+        data = request.get_json()
+        paths = data.get("paths", [])
+        if not paths:
+            return jsonify({"success": False, "error": "No paths provided"}), 400
+        results = {"success": [], "failed": []}
+        for p in paths:
+            try:
+                soft_delete_item(p, username)
+                log_audit(username, "delete", p)
+                results["success"].append(p)
+            except Exception as e:
+                results["failed"].append({"path": p, "error": str(e)})
+        if results["success"]:
+            emit_file_event(username, "delete", {"paths": results["success"]})
+        return jsonify({"success": True, "results": results})
+
+    @app.route("/api/files/batch-move", methods=["POST"])
+    @token_required
+    def api_batch_move():
+        username = g.user["username"]
+        data = request.get_json()
+        sources = data.get("sources", [])
+        dst = data.get("dst", "")
+        if not sources or not dst:
+            return jsonify({"success": False, "error": "Sources and destination are required"}), 400
+        results = {"success": [], "failed": []}
+        for src in sources:
+            try:
+                info = move_item(src, dst, username)
+                log_audit(username, "move", src, {"dst": dst, "newPath": info["path"]})
+                results["success"].append({"src": src, "newPath": info["path"]})
+            except Exception as e:
+                results["failed"].append({"path": src, "error": str(e)})
+        if results["success"]:
+            emit_file_event(username, "move", {"items": results["success"], "dst": dst})
+        return jsonify({"success": True, "results": results})
 
     @app.route("/api/files/upload", methods=["POST"])
     @token_required

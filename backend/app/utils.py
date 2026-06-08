@@ -360,6 +360,27 @@ def get_share(share_id: str, password: Optional[str] = None) -> Tuple[Optional[D
     return share, None
 
 
+def list_directory_tree(rel_path: str, username: str) -> List[Dict]:
+    abs_path = get_abs_path(rel_path, username)
+    if not abs_path.exists() or not abs_path.is_dir():
+        return []
+    items = []
+    for item in abs_path.iterdir():
+        if item.name == TRASH_DIR_NAME:
+            continue
+        if item.is_dir():
+            items.append({
+                "name": item.name,
+                "path": str(item.relative_to(get_user_files_dir_safe(username))),
+                "hasChildren": any(
+                    c.is_dir() and c.name != TRASH_DIR_NAME
+                    for c in item.iterdir()
+                ),
+            })
+    items.sort(key=lambda x: x["name"].lower())
+    return items
+
+
 def search_files(query: str, extension: Optional[str] = None, path: str = "", username: str = "") -> List[Dict]:
     abs_path = get_abs_path(path, username)
     if not abs_path.exists() or not abs_path.is_dir():
