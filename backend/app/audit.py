@@ -27,6 +27,8 @@ AUDIT_TYPES = {
     "restore_trash",
     "permanent_delete",
     "empty_trash",
+    "add_favorite",
+    "remove_favorite",
 }
 
 

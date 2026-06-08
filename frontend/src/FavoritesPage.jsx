@@ -75,7 +75,6 @@ function FavoritesPage() {
   }, [])
 
   const handleRemoveFavorite = async (item) => {
-    if (!confirm(`确定要取消收藏 "${item.name}" 吗？`)) return
     try {
       await api.removeFavorite(item.path)
       loadFavorites()

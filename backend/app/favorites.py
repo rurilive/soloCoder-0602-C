@@ -1,9 +1,20 @@
 import json
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from .config import FAVORITES_DIR, get_user_files_dir_safe
+
+_user_locks: Dict[str, threading.Lock] = {}
+_locks_lock = threading.Lock()
+
+
+def _get_user_lock(username: str) -> threading.Lock:
+    with _locks_lock:
+        if username not in _user_locks:
+            _user_locks[username] = threading.Lock()
+        return _user_locks[username]
 
 
 def ensure_favorites_dir():
@@ -36,42 +47,46 @@ def add_favorite(rel_path: str, username: str) -> Dict:
     if not abs_path.exists():
         raise ValueError("File or folder not found")
 
-    favorites = _load_favorites(username)
-    for fav in favorites:
-        if fav["path"] == rel_path:
-            raise ValueError("Already in favorites")
+    with _get_user_lock(username):
+        favorites = _load_favorites(username)
+        for fav in favorites:
+            if fav["path"] == rel_path:
+                raise ValueError("Already in favorites")
 
-    file_info = get_file_info(abs_path, username)
-    favorite_item = {
-        "name": file_info["name"],
-        "path": file_info["path"],
-        "isDir": file_info["isDir"],
-        "size": file_info["size"],
-        "type": file_info["extension"] if file_info["extension"] else ("folder" if file_info["isDir"] else "file"),
-        "extension": file_info["extension"],
-        "favoritedAt": datetime.now().isoformat(),
-        "modified": file_info["modified"],
-    }
-    favorites.append(favorite_item)
-    _save_favorites(username, favorites)
+        file_info = get_file_info(abs_path, username)
+        favorite_item = {
+            "name": file_info["name"],
+            "path": file_info["path"],
+            "isDir": file_info["isDir"],
+            "size": file_info["size"],
+            "type": file_info["extension"] if file_info["extension"] else ("folder" if file_info["isDir"] else "file"),
+            "extension": file_info["extension"],
+            "favoritedAt": datetime.now().isoformat(),
+            "modified": file_info["modified"],
+        }
+        favorites.append(favorite_item)
+        _save_favorites(username, favorites)
     return favorite_item
 
 
 def remove_favorite(rel_path: str, username: str) -> bool:
-    favorites = _load_favorites(username)
-    new_favorites = [f for f in favorites if f["path"] != rel_path]
-    if len(new_favorites) == len(favorites):
-        raise ValueError("Not in favorites")
-    _save_favorites(username, new_favorites)
+    with _get_user_lock(username):
+        favorites = _load_favorites(username)
+        new_favorites = [f for f in favorites if f["path"] != rel_path]
+        if len(new_favorites) == len(favorites):
+            raise ValueError("Not in favorites")
+        _save_favorites(username, new_favorites)
     return True
 
 
 def list_favorites(username: str) -> List[Dict]:
-    favorites = _load_favorites(username)
+    with _get_user_lock(username):
+        favorites = _load_favorites(username)
     favorites.sort(key=lambda x: x.get("favoritedAt", ""), reverse=True)
     return favorites
 
 
 def is_favorite(rel_path: str, username: str) -> bool:
-    favorites = _load_favorites(username)
+    with _get_user_lock(username):
+        favorites = _load_favorites(username)
     return any(f["path"] == rel_path for f in favorites)
