@@ -47,6 +47,13 @@ from .audit import (
     read_audit_logs,
     ensure_audit_dir,
 )
+from .favorites import (
+    add_favorite,
+    remove_favorite,
+    list_favorites,
+    is_favorite,
+    ensure_favorites_dir,
+)
 
 socketio = SocketIO(
     cors_allowed_origins="*",
@@ -99,6 +106,7 @@ def create_app():
     _register_socket_handlers()
     ensure_dirs()
     ensure_audit_dir()
+    ensure_favorites_dir()
     start_audit_worker()
     try:
         clean_all_expired_trash()
@@ -538,6 +546,51 @@ def create_app():
         try:
             result = read_audit_logs(username, action_type, page, per_page)
             return jsonify({"success": True, **result})
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)}), 400
+
+    @app.route("/api/favorites", methods=["POST"])
+    @token_required
+    def api_add_favorite():
+        username = g.user["username"]
+        data = request.get_json()
+        path = data.get("path", "")
+        if not path:
+            return jsonify({"success": False, "error": "Path is required"}), 400
+        try:
+            item = add_favorite(path, username)
+            log_audit(username, "add_favorite", path)
+            emit_file_event(username, "favorite_change", {"action": "add", "item": item})
+            return jsonify({"success": True, "item": item})
+        except ValueError as e:
+            return jsonify({"success": False, "error": str(e)}), 400
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)}), 400
+
+    @app.route("/api/favorites", methods=["DELETE"])
+    @token_required
+    def api_remove_favorite():
+        username = g.user["username"]
+        path = request.args.get("path", "")
+        if not path:
+            return jsonify({"success": False, "error": "Path is required"}), 400
+        try:
+            remove_favorite(path, username)
+            log_audit(username, "remove_favorite", path)
+            emit_file_event(username, "favorite_change", {"action": "remove", "path": path})
+            return jsonify({"success": True})
+        except ValueError as e:
+            return jsonify({"success": False, "error": str(e)}), 400
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)}), 400
+
+    @app.route("/api/favorites", methods=["GET"])
+    @token_required
+    def api_list_favorites():
+        username = g.user["username"]
+        try:
+            items = list_favorites(username)
+            return jsonify({"success": True, "items": items})
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 400
 

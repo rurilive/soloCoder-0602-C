@@ -142,5 +142,9 @@ export const api = {
     }
     return apiClient.get(url)
   },
+
+  listFavorites: () => apiClient.get('/favorites'),
+  addFavorite: (path) => apiClient.post('/favorites', { path }),
+  removeFavorite: (path) => apiClient.delete(`/favorites?path=${encodeURIComponent(path)}`),
 }
 

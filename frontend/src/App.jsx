@@ -60,6 +60,7 @@ function App() {
   const [isSearching, setIsSearching] = useState(false)
   const [storageUsage, setStorageUsage] = useState(null)
   const [notification, setNotification] = useState(null)
+  const [favorites, setFavorites] = useState(new Set())
   const socketRef = useRef(null)
   const currentPathRef = useRef(currentPath)
   const fileInputRef = useRef(null)
@@ -76,6 +77,32 @@ function App() {
       setStorageUsage(res.data.usage)
     } catch (e) {
       setStorageUsage(null)
+    }
+  }
+
+  const loadFavorites = async () => {
+    try {
+      const res = await api.listFavorites()
+      const paths = new Set((res.data.items || []).map(f => f.path))
+      setFavorites(paths)
+    } catch (e) {
+      setFavorites(new Set())
+    }
+  }
+
+  const toggleFavorite = async (item, e) => {
+    if (e) e.stopPropagation()
+    const isFav = favorites.has(item.path)
+    try {
+      if (isFav) {
+        await api.removeFavorite(item.path)
+        setFavorites(prev => { const next = new Set(prev); next.delete(item.path); return next })
+      } else {
+        await api.addFavorite(item.path)
+        setFavorites(prev => { const next = new Set(prev); next.add(item.path); return next })
+      }
+    } catch (err) {
+      alert('操作失败: ' + (err.response?.data?.error || err.message))
     }
   }
 
@@ -107,6 +134,7 @@ function App() {
       copy: '复制了文件',
       create_folder: '创建了文件夹',
       restore_trash: '恢复了文件',
+      favorite_change: data?.action === 'add' ? '收藏了文件' : '取消了收藏',
     }
     const itemName = data?.item?.name || data?.path || ''
     return `${actionNames[eventType] || '操作了'}: ${itemName}`
@@ -115,6 +143,7 @@ function App() {
   useEffect(() => {
     loadFiles('')
     loadStorageUsage()
+    loadFavorites()
 
     const socket = createSocket()
     if (socket) {
@@ -131,6 +160,9 @@ function App() {
       socket.on('file_event', (event) => {
         const { type, data } = event
         console.log('Received file event:', type, data)
+        if (type === 'favorite_change') {
+          loadFavorites()
+        }
         loadFiles(currentPathRef.current)
         loadStorageUsage()
         const message = getActionMessage(type, data)
@@ -585,6 +617,7 @@ function App() {
               title={isQuotaFull ? '存储空间不足，请先清理文件' : ''}
             >📤 上传文件</button>
             <button className="btn btn-primary" onClick={() => setShowNewFolderModal(true)}>📁 新建文件夹</button>
+            <button className="btn btn-secondary" onClick={() => navigate('/favorites')}>⭐ 收藏夹</button>
             <button className="btn btn-secondary" onClick={() => navigate('/trash')}>🗑️ 回收站</button>
             <button className="btn btn-secondary" onClick={() => navigate('/audit')}>📋 审计日志</button>
             <button className="btn btn-secondary" onClick={() => api.logout()}>🚪 退出</button>
@@ -682,6 +715,11 @@ function App() {
               <div className="size">{item.isDir ? '-' : formatSize(item.size)}</div>
               <div className="date">{formatDate(item.modified)}</div>
               <div className="item-actions">
+                <button
+                  className={`btn btn-small fav-btn ${favorites.has(item.path) ? 'fav-active' : ''}`}
+                  onClick={(e) => toggleFavorite(item, e)}
+                  title={favorites.has(item.path) ? '取消收藏' : '添加收藏'}
+                >{favorites.has(item.path) ? '★' : '☆'}</button>
                 <button className="btn btn-secondary btn-small" onClick={(e) => { e.stopPropagation(); handlePreview(item) }}>预览</button>
                 <button className="btn btn-secondary btn-small" onClick={(e) => { e.stopPropagation(); window.open(api.downloadFile(item.path), '_blank') }}>下载</button>
               </div>
@@ -698,6 +736,7 @@ function App() {
           <div className="context-menu-item" onClick={() => { handleCopy(); setContextMenu(null) }}>📄 复制</div>
           <div className="context-menu-item" onClick={() => { window.open(api.downloadFile(selected?.path), '_blank'); setContextMenu(null) }}>⬇️ 下载</div>
           <div className="context-menu-item" onClick={() => { handleShare(); setContextMenu(null) }}>🔗 分享</div>
+          <div className="context-menu-item" onClick={() => { toggleFavorite(selected); setContextMenu(null) }}>{favorites.has(selected?.path) ? '☆ 取消收藏' : '★ 添加收藏'}</div>
           <div className="context-menu-divider"></div>
           <div className="context-menu-item" onClick={() => { handleDelete(); setContextMenu(null) }} style={{ color: '#ff5252' }}>🗑️ 删除</div>
         </div>
