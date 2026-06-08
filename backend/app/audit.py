@@ -120,7 +120,7 @@ def _count_total_lines_filtered(file_path: Path, action_type: str) -> int:
 
 
 def _count_total_lines(file_path: Path, action_type: Optional[str] = None) -> int:
-    file_size, _ = _get_file_meta(file_path)
+    file_size, file_mtime = _get_file_meta(file_path)
     if file_size == 0:
         return 0
 
@@ -130,8 +130,8 @@ def _count_total_lines(file_path: Path, action_type: Optional[str] = None) -> in
     with _count_cache_lock:
         cached = _count_cache.get(cache_key)
         if cached:
-            cached_size, cached_time, cached_count = cached
-            if cached_size == file_size:
+            cached_size, cached_mtime, cached_time, cached_count = cached
+            if cached_size == file_size and cached_mtime == file_mtime:
                 return cached_count
             if now - cached_time < CACHE_TTL_SECONDS:
                 return cached_count
@@ -142,7 +142,7 @@ def _count_total_lines(file_path: Path, action_type: Optional[str] = None) -> in
         count = _count_total_lines_filtered(file_path, action_type)
 
     with _count_cache_lock:
-        _count_cache[cache_key] = (file_size, now, count)
+        _count_cache[cache_key] = (file_size, file_mtime, now, count)
 
     return count
 

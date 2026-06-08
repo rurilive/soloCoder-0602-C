@@ -55,6 +55,8 @@ socketio = SocketIO(
     engineio_logger=False,
 )
 
+_handlers_registered = False
+
 
 def emit_file_event(username, event_type, data=None):
     if socketio:
@@ -65,22 +67,28 @@ def emit_file_event(username, event_type, data=None):
         )
 
 
-@socketio.on("connect")
-def on_connect():
-    token = None
-    auth_header = request.headers.get("Authorization")
-    if auth_header and auth_header.startswith("Bearer "):
-        token = auth_header.split(" ")[1]
-    if not token:
-        token = request.args.get("token")
-    if not token:
-        return False
-    try:
-        data = decode_token(token)
-        username = data["username"]
-        join_room(f"user:{username}")
-    except ValueError:
-        return False
+def _register_socket_handlers():
+    global _handlers_registered
+    if _handlers_registered:
+        return
+    _handlers_registered = True
+
+    @socketio.on("connect")
+    def on_connect():
+        token = None
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header.split(" ")[1]
+        if not token:
+            token = request.args.get("token")
+        if not token:
+            return False
+        try:
+            data = decode_token(token)
+            username = data["username"]
+            join_room(f"user:{username}")
+        except ValueError:
+            return False
 
 
 def create_app():
@@ -88,6 +96,7 @@ def create_app():
     app.config.from_object(Config)
     CORS(app, resources={r"/socket.io/*": {"origins": "*"}})
     socketio.init_app(app)
+    _register_socket_handlers()
     ensure_dirs()
     ensure_audit_dir()
     start_audit_worker()
