@@ -640,7 +640,7 @@ function App() {
     const paths = Array.from(selectedPaths)
     if (paths.length === 0) return
     if (!confirm(`确定要删除选中的 ${paths.length} 个项目吗？文件将移到回收站，30天后自动清理。`)) return
-    setBatchProgress({ current: 0, total: paths.length, action: '删除' })
+    setBatchProgress({ action: '删除', showTextOnly: true })
     try {
       const res = await api.batchDelete(paths)
       const results = res.data?.results || { success: [], failed: [] }
@@ -693,7 +693,7 @@ function App() {
           alert('移动失败: ' + (e.response?.data?.error || e.message))
         })
       } else {
-        setBatchProgress({ current: 0, total: sources.length, action: '移动' })
+        setBatchProgress({ action: '移动', showTextOnly: true })
         try {
           const res = await api.batchMove(sources, targetPath)
           const results = res.data?.results || { success: [], failed: [] }
@@ -1145,12 +1145,20 @@ function App() {
         <div className="modal-overlay">
           <div className="modal">
             <h3>批量{batchProgress.action}中</h3>
-            <div className="upload-progress">
-              <div className="upload-progress-bar" style={{ width: `${(batchProgress.current / batchProgress.total) * 100}%` }}></div>
-            </div>
-            <div style={{ textAlign: 'center', fontSize: '13px', color: '#666', marginTop: '8px' }}>
-              {batchProgress.current} / {batchProgress.total}
-            </div>
+            {batchProgress.showTextOnly ? (
+              <div style={{ textAlign: 'center', fontSize: '14px', color: '#666', padding: '16px 0' }}>
+                处理中...
+              </div>
+            ) : (
+              <>
+                <div className="upload-progress">
+                  <div className="upload-progress-bar" style={{ width: `${(batchProgress.current / batchProgress.total) * 100}%` }}></div>
+                </div>
+                <div style={{ textAlign: 'center', fontSize: '13px', color: '#666', marginTop: '8px' }}>
+                  {batchProgress.current} / {batchProgress.total}
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
