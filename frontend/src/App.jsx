@@ -33,16 +33,21 @@ function getIconEmoji(item) {
 
 function DirectoryTreeSelector({ excludePaths, onSelect, onCancel }) {
   const [treeData, setTreeData] = useState({})
-  const [expandedPaths, setExpandedPaths] = useState(new Set(['']))
+  const [expandedPaths, setExpandedPaths] = useState(new Set())
+  const [loadedWithChildren, setLoadedWithChildren] = useState(new Set())
   const [selectedPath, setSelectedPath] = useState(null)
   const [loadingPaths, setLoadingPaths] = useState(new Set())
 
   const loadTree = async (path) => {
-    if (treeData[path]) return
+    if (treeData.hasOwnProperty(path) || loadingPaths.has(path)) return
     setLoadingPaths(prev => new Set(prev).add(path))
     try {
       const res = await api.getFileTree(path)
-      setTreeData(prev => ({ ...prev, [path]: res.data.items || [] }))
+      const items = res.data.items || []
+      setTreeData(prev => ({ ...prev, [path]: items }))
+      if (items.length > 0) {
+        setLoadedWithChildren(prev => new Set(prev).add(path))
+      }
     } catch (e) {
       setTreeData(prev => ({ ...prev, [path]: [] }))
     }
@@ -64,6 +69,17 @@ function DirectoryTreeSelector({ excludePaths, onSelect, onCancel }) {
       }
       return next
     })
+  }
+
+  const handleExpandClick = (path, e) => {
+    e.stopPropagation()
+    const isLoaded = treeData.hasOwnProperty(path) || loadingPaths.has(path)
+    if (!isLoaded) {
+      setExpandedPaths(prev => new Set(prev).add(path))
+      loadTree(path)
+    } else {
+      toggleExpand(path)
+    }
   }
 
   const isExcluded = (path) => {
@@ -90,7 +106,7 @@ function DirectoryTreeSelector({ excludePaths, onSelect, onCancel }) {
         {items.map(item => {
           const excluded = isExcluded(item.path)
           const isSelected = selectedPath === item.path
-          const hasChildren = item.hasChildren
+          const hasArrow = loadedWithChildren.has(item.path) || !treeData.hasOwnProperty(item.path)
           const isItemExpanded = expandedPaths.has(item.path)
 
           return (
@@ -101,10 +117,10 @@ function DirectoryTreeSelector({ excludePaths, onSelect, onCancel }) {
                 onClick={() => !excluded && setSelectedPath(item.path)}
               >
                 <span
-                  className="tree-toggle"
-                  onClick={(e) => { e.stopPropagation(); hasChildren && toggleExpand(item.path) }}
+                  className={`tree-toggle ${hasArrow ? 'tree-toggle-visible' : ''}`}
+                  onClick={(e) => { e.stopPropagation(); !excluded && hasArrow && handleExpandClick(item.path, e) }}
                 >
-                  {hasChildren ? (isItemExpanded ? '▼' : '▶') : ''}
+                  {hasArrow ? (isItemExpanded ? '▼' : '▶') : ''}
                 </span>
                 <span className="tree-icon">📁</span>
                 <span className="tree-name">{item.name}</span>
@@ -133,7 +149,12 @@ function DirectoryTreeSelector({ excludePaths, onSelect, onCancel }) {
             style={{ paddingLeft: '12px' }}
             onClick={() => setSelectedPath('')}
           >
-            <span className="tree-toggle"></span>
+            <span
+              className={`tree-toggle ${loadedWithChildren.has('') || !treeData.hasOwnProperty('') ? 'tree-toggle-visible' : ''}`}
+              onClick={(e) => { e.stopPropagation(); handleExpandClick('', e) }}
+            >
+              {expandedPaths.has('') ? '▼' : (loadedWithChildren.has('') || !treeData.hasOwnProperty('') ? '▶' : '')}
+            </span>
             <span className="tree-icon">🏠</span>
             <span className="tree-name">根目录</span>
           </div>
@@ -620,23 +641,27 @@ function App() {
     if (paths.length === 0) return
     if (!confirm(`确定要删除选中的 ${paths.length} 个项目吗？文件将移到回收站，30天后自动清理。`)) return
     setBatchProgress({ current: 0, total: paths.length, action: '删除' })
-    let successCount = 0
-    let failCount = 0
-    for (let i = 0; i < paths.length; i++) {
-      try {
-        await api.deleteItem(paths[i])
-        successCount++
-      } catch (e) {
-        failCount++
+    try {
+      const res = await api.batchDelete(paths)
+      const results = res.data?.results || { success: [], failed: [] }
+      const successCount = results.success?.length || 0
+      const failCount = results.failed?.length || 0
+      setBatchProgress(null)
+      setSelectedPaths(new Set())
+      setSelected(null)
+      loadFiles()
+      loadStorageUsage()
+      let msg = `批量删除完成: 成功 ${successCount} 个`
+      if (failCount > 0) msg += `，失败 ${failCount} 个`
+      if (results.failed?.length > 0) {
+        const errors = results.failed.map(f => `${f.path}: ${f.error}`).join('\n')
+        msg += `\n详情:\n${errors}`
       }
-      setBatchProgress({ current: i + 1, total: paths.length, action: '删除' })
+      showNotification(msg, failCount > 0 ? 'error' : 'success')
+    } catch (e) {
+      setBatchProgress(null)
+      showNotification('批量删除失败: ' + (e.response?.data?.error || e.message), 'error')
     }
-    setBatchProgress(null)
-    setSelectedPaths(new Set())
-    setSelected(null)
-    loadFiles()
-    loadStorageUsage()
-    showNotification(`批量删除完成: 成功 ${successCount} 个${failCount > 0 ? `，失败 ${failCount} 个` : ''}`, failCount > 0 ? 'error' : 'success')
   }
 
   const handleMove = () => {
@@ -656,10 +681,11 @@ function App() {
 
   const handleTreeSelect = async (targetPath) => {
     setShowTreeSelector(false)
+    const sources = treeSelectorSources
 
     if (treeSelectorMode === 'move') {
-      if (treeSelectorSources.length === 1) {
-        api.moveItem(treeSelectorSources[0], targetPath).then(() => {
+      if (sources.length === 1) {
+        api.moveItem(sources[0], targetPath).then(() => {
           setSelected(null)
           setSelectedPaths(new Set())
           loadFiles()
@@ -667,28 +693,31 @@ function App() {
           alert('移动失败: ' + (e.response?.data?.error || e.message))
         })
       } else {
-        const paths = treeSelectorSources
-        setBatchProgress({ current: 0, total: paths.length, action: '移动' })
-        let successCount = 0
-        let failCount = 0
-        for (let i = 0; i < paths.length; i++) {
-          try {
-            await api.moveItem(paths[i], targetPath)
-            successCount++
-          } catch (e) {
-            failCount++
+        setBatchProgress({ current: 0, total: sources.length, action: '移动' })
+        try {
+          const res = await api.batchMove(sources, targetPath)
+          const results = res.data?.results || { success: [], failed: [] }
+          const successCount = results.success?.length || 0
+          const failCount = results.failed?.length || 0
+          setBatchProgress(null)
+          setSelectedPaths(new Set())
+          setSelected(null)
+          loadFiles()
+          let msg = `批量移动完成: 成功 ${successCount} 个`
+          if (failCount > 0) msg += `，失败 ${failCount} 个`
+          if (results.failed?.length > 0) {
+            const errors = results.failed.map(f => `${f.path}: ${f.error}`).join('\n')
+            msg += `\n详情:\n${errors}`
           }
-          setBatchProgress({ current: i + 1, total: paths.length, action: '移动' })
+          showNotification(msg, failCount > 0 ? 'error' : 'success')
+        } catch (e) {
+          setBatchProgress(null)
+          showNotification('批量移动失败: ' + (e.response?.data?.error || e.message), 'error')
         }
-        setBatchProgress(null)
-        setSelectedPaths(new Set())
-        setSelected(null)
-        loadFiles()
-        showNotification(`批量移动完成: 成功 ${successCount} 个${failCount > 0 ? `，失败 ${failCount} 个` : ''}`, failCount > 0 ? 'error' : 'success')
       }
     } else {
-      if (treeSelectorSources.length === 1) {
-        api.copyItem(treeSelectorSources[0], targetPath).then(() => {
+      if (sources.length === 1) {
+        api.copyItem(sources[0], targetPath).then(() => {
           setSelected(null)
           loadFiles()
           loadStorageUsage()
@@ -701,6 +730,32 @@ function App() {
             alert('复制失败: ' + (e.response?.data?.error || e.message))
           }
         })
+      } else {
+        setBatchProgress({ current: 0, total: sources.length, action: '复制' })
+        let successCount = 0
+        let failCount = 0
+        let quotaExceeded = false
+        for (let i = 0; i < sources.length; i++) {
+          try {
+            await api.copyItem(sources[i], targetPath)
+            successCount++
+          } catch (e) {
+            failCount++
+            if (e.response?.status === 403) {
+              quotaExceeded = true
+              break
+            }
+          }
+          setBatchProgress({ current: i + 1, total: sources.length, action: '复制' })
+        }
+        setBatchProgress(null)
+        setSelected(null)
+        loadFiles()
+        loadStorageUsage()
+        let msg = `批量复制完成: 成功 ${successCount} 个`
+        if (failCount > 0) msg += `，失败 ${failCount} 个`
+        if (quotaExceeded) msg += '（存储空间不足，剩余文件未复制）'
+        showNotification(msg, failCount > 0 ? 'error' : 'success')
       }
     }
   }

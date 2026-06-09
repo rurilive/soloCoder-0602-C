@@ -365,17 +365,14 @@ def list_directory_tree(rel_path: str, username: str) -> List[Dict]:
     if not abs_path.exists() or not abs_path.is_dir():
         return []
     items = []
+    user_dir = get_user_files_dir_safe(username)
     for item in abs_path.iterdir():
         if item.name == TRASH_DIR_NAME:
             continue
         if item.is_dir():
             items.append({
                 "name": item.name,
-                "path": str(item.relative_to(get_user_files_dir_safe(username))),
-                "hasChildren": any(
-                    c.is_dir() and c.name != TRASH_DIR_NAME
-                    for c in item.iterdir()
-                ),
+                "path": str(item.relative_to(user_dir)),
             })
     items.sort(key=lambda x: x["name"].lower())
     return items
