@@ -3,6 +3,7 @@ import AssetList from './pages/AssetList'
 import AssetForm from './pages/AssetForm'
 import AssetDetail from './pages/AssetDetail'
 import AssetScan from './pages/AssetScan'
+import AssetTagRedirect from './pages/AssetTagRedirect'
 
 export default function App() {
   return (
