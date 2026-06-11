@@ -20,6 +20,7 @@ export default function App() {
         <Routes>
           <Route path="/" element={<AssetList />} />
           <Route path="/assets/new" element={<AssetForm />} />
+          <Route path="/assets/tag/:tag" element={<AssetTagRedirect />} />
           <Route path="/assets/:id/edit" element={<AssetForm />} />
           <Route path="/assets/:id" element={<AssetDetail />} />
           <Route path="/scan" element={<AssetScan />} />
