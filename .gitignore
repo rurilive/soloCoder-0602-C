@@ -1,76 +1,20 @@
-# Python
 __pycache__/
 *.py[cod]
 *$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
 *.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
-
-# Virtual environments
-.venv/
-env/
-venv/
-ENV/
-
-# PID files
-*.pid
-backend/.pid
-frontend/.pid
-
-# uv
-.uv/
-
-# Node.js
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-package-lock.json
-yarn.lock
-.pnpm-debug.log*
-
-# Build outputs
 dist/
 build/
-.vite/
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Data
-backend/data/files/
-backend/data/shares/
-!backend/data/files/.gitkeep
-!backend/data/shares/.gitkeep
-
-# Env
+.eggs/
+*.egg
+.venv/
+venv/
+env/
 .env
-.env.local
-.env.*.local
-
-# Logs
+*.db
+*.sqlite3
+node_modules/
+frontend/dist/
+frontend/.vite/
+.DS_Store
 *.log
-logs/
+.uv/
