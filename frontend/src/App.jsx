@@ -4,6 +4,7 @@ import AssetForm from './pages/AssetForm'
 import AssetDetail from './pages/AssetDetail'
 import AssetScan from './pages/AssetScan'
 import AssetTagRedirect from './pages/AssetTagRedirect'
+import AssetImport from './pages/AssetImport'
 
 export default function App() {
   return (
@@ -13,6 +14,7 @@ export default function App() {
         <nav>
           <NavLink to="/" end className={({ isActive }) => isActive ? 'active' : ''}>资产列表</NavLink>
           <NavLink to="/assets/new" className={({ isActive }) => isActive ? 'active' : ''}>资产入库</NavLink>
+          <NavLink to="/import" className={({ isActive }) => isActive ? 'active' : ''}>批量导入</NavLink>
           <NavLink to="/scan" className={({ isActive }) => isActive ? 'active' : ''}>扫码查询</NavLink>
         </nav>
       </header>
@@ -23,6 +25,7 @@ export default function App() {
           <Route path="/assets/tag/:tag" element={<AssetTagRedirect />} />
           <Route path="/assets/:id/edit" element={<AssetForm />} />
           <Route path="/assets/:id" element={<AssetDetail />} />
+          <Route path="/import" element={<AssetImport />} />
           <Route path="/scan" element={<AssetScan />} />
         </Routes>
       </main>

@@ -75,3 +75,27 @@ class AssetLogResponse(BaseModel):
 class AssetListResponse(BaseModel):
     total: int
     items: list[AssetResponse]
+
+
+class ImportErrorItem(BaseModel):
+    row: int
+    reason: str
+
+
+class ImportResultResponse(BaseModel):
+    success: bool
+    total_rows: int
+    success_count: int = 0
+    errors: list[ImportErrorItem] = []
+
+
+class ImportLogResponse(BaseModel):
+    id: int
+    total_rows: int
+    success_count: int
+    file_name: str
+    operator: str
+    detail: str | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}

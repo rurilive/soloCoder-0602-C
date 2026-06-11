@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, UploadFile, File
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import AssetStatus
@@ -11,6 +11,7 @@ from app.schemas import (
     AssetResponse,
     AssetListResponse,
     AssetLogResponse,
+    ImportResultResponse,
 )
 from app import crud
 
@@ -38,6 +39,16 @@ def list_assets(
 @router.get("/tag/{asset_tag}", response_model=AssetResponse)
 def get_asset_by_tag(asset_tag: str, db: Session = Depends(get_db)):
     return crud.get_asset_by_tag(db, asset_tag)
+
+
+@router.post("/import", response_model=ImportResultResponse)
+def import_assets(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    if not file.filename or not file.filename.endswith((".xlsx", ".xls")):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail="仅支持xlsx格式文件")
+    file_bytes = file.file.read()
+    result = crud.batch_import_assets(db, file_bytes, file.filename or "unknown.xlsx")
+    return ImportResultResponse(**result)
 
 
 @router.get("/{asset_id}", response_model=AssetResponse)
