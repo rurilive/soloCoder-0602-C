@@ -16,7 +16,7 @@ export default function AssetImport() {
   const handleFileChange = (e) => {
     const selected = e.target.files[0]
     if (selected) {
-      if (!selected.name.endsWith('.xlsx') && !selected.name.endsWith('.xls')) {
+      if (!selected.name.toLowerCase().endsWith('.xlsx')) {
         setErrorMsg('请选择xlsx格式的文件')
         setFile(null)
         return
@@ -31,7 +31,7 @@ export default function AssetImport() {
     e.preventDefault()
     const dropped = e.dataTransfer.files[0]
     if (dropped) {
-      if (!dropped.name.endsWith('.xlsx') && !dropped.name.endsWith('.xls')) {
+      if (!dropped.name.toLowerCase().endsWith('.xlsx')) {
         setErrorMsg('请选择xlsx格式的文件')
         return
       }
@@ -110,7 +110,7 @@ export default function AssetImport() {
           <input
             ref={inputRef}
             type="file"
-            accept=".xlsx,.xls"
+            accept=".xlsx"
             onChange={handleFileChange}
             className="import-file-input"
           />

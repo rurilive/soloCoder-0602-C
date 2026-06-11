@@ -336,7 +336,7 @@ def batch_import_assets(db: Session, file_bytes: bytes, file_name: str) -> dict:
     )
     db.add(import_log)
 
-    db.commit()
+    db.flush()
 
     for asset in created_assets:
         log = AssetLog(
@@ -348,6 +348,9 @@ def batch_import_assets(db: Session, file_bytes: bytes, file_name: str) -> dict:
         db.add(log)
 
     db.commit()
+
+    for asset in created_assets:
+        db.refresh(asset)
 
     return {
         "success": True,

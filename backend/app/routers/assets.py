@@ -43,7 +43,7 @@ def get_asset_by_tag(asset_tag: str, db: Session = Depends(get_db)):
 
 @router.post("/import", response_model=ImportResultResponse)
 def import_assets(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    if not file.filename or not file.filename.endswith((".xlsx", ".xls")):
+    if not file.filename or not file.filename.lower().endswith(".xlsx"):
         from fastapi import HTTPException
         raise HTTPException(status_code=400, detail="仅支持xlsx格式文件")
     file_bytes = file.file.read()
