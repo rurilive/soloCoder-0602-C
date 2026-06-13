@@ -22,6 +22,13 @@ export const approveApproval = (id, data) => api.post(`/approvals/${id}/approve`
 export const rejectApproval = (id, data) => api.post(`/approvals/${id}/reject`, data)
 export const createApproval = (assetId, data) => api.post(`/approvals/asset/${assetId}`, data)
 
+export const getApprovalChains = (params) => api.get('/approvals/chains/list', { params })
+export const getApprovalChain = (id) => api.get(`/approvals/chains/${id}`)
+export const createApprovalChain = (data) => api.post('/approvals/chains', data)
+export const updateApprovalChain = (id, data) => api.put(`/approvals/chains/${id}`, data)
+export const deleteApprovalChain = (id) => api.delete(`/approvals/chains/${id}`)
+export const reorderChainNodes = (id, nodeIds) => api.put(`/approvals/chains/${id}/reorder`, { node_ids: nodeIds })
+
 export const importAssets = (file, onUploadProgress) => {
   const formData = new FormData()
   formData.append('file', file)

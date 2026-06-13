@@ -53,6 +53,45 @@ class Asset(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
 
 
+class ApprovalChain(Base):
+    __tablename__ = "approval_chains"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    approval_type: Mapped[ApprovalType] = mapped_column(Enum(ApprovalType), nullable=False)
+    min_price: Mapped[float | None] = mapped_column(nullable=True)
+    max_price: Mapped[float | None] = mapped_column(nullable=True)
+    is_default: Mapped[bool] = mapped_column(default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+
+
+class ApprovalChainNode(Base):
+    __tablename__ = "approval_chain_nodes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chain_id: Mapped[int] = mapped_column(Integer, ForeignKey("approval_chains.id"), nullable=False, index=True)
+    level: Mapped[int] = mapped_column(Integer, nullable=False)
+    approver_role: Mapped[str] = mapped_column(String(64), nullable=False)
+    approver_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
+
+
+class ApprovalNodeRecord(Base):
+    __tablename__ = "approval_node_records"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    approval_id: Mapped[int] = mapped_column(Integer, ForeignKey("approvals.id"), nullable=False, index=True)
+    chain_node_id: Mapped[int] = mapped_column(Integer, ForeignKey("approval_chain_nodes.id"), nullable=False)
+    level: Mapped[int] = mapped_column(Integer, nullable=False)
+    approver_role: Mapped[str] = mapped_column(String(64), nullable=False)
+    approver_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[ApprovalStatus] = mapped_column(Enum(ApprovalStatus), default=ApprovalStatus.PENDING, nullable=False)
+    opinion: Mapped[str | None] = mapped_column(Text, nullable=True)
+    acted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
+
+
 class Approval(Base):
     __tablename__ = "approvals"
 
@@ -66,6 +105,9 @@ class Approval(Base):
     approver: Mapped[str | None] = mapped_column(String(128), nullable=True)
     approval_opinion: Mapped[str | None] = mapped_column(Text, nullable=True)
     previous_status: Mapped[AssetStatus] = mapped_column(Enum(AssetStatus), nullable=False)
+    current_level: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    total_levels: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    chain_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("approval_chains.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
 

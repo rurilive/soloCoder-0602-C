@@ -6,6 +6,8 @@ import AssetScan from './pages/AssetScan'
 import AssetTagRedirect from './pages/AssetTagRedirect'
 import AssetImport from './pages/AssetImport'
 import ApprovalList from './pages/ApprovalList'
+import ApprovalDetail from './pages/ApprovalDetail'
+import ApprovalChainConfig from './pages/ApprovalChainConfig'
 
 export default function App() {
   return (
@@ -15,6 +17,7 @@ export default function App() {
         <nav>
           <NavLink to="/" end className={({ isActive }) => isActive ? 'active' : ''}>资产列表</NavLink>
           <NavLink to="/approvals" className={({ isActive }) => isActive ? 'active' : ''}>审批管理</NavLink>
+          <NavLink to="/approval-chains" className={({ isActive }) => isActive ? 'active' : ''}>审批链配置</NavLink>
           <NavLink to="/assets/new" className={({ isActive }) => isActive ? 'active' : ''}>资产入库</NavLink>
           <NavLink to="/import" className={({ isActive }) => isActive ? 'active' : ''}>批量导入</NavLink>
           <NavLink to="/scan" className={({ isActive }) => isActive ? 'active' : ''}>扫码查询</NavLink>
@@ -24,6 +27,8 @@ export default function App() {
         <Routes>
           <Route path="/" element={<AssetList />} />
           <Route path="/approvals" element={<ApprovalList />} />
+          <Route path="/approvals/:id" element={<ApprovalDetail />} />
+          <Route path="/approval-chains" element={<ApprovalChainConfig />} />
           <Route path="/assets/new" element={<AssetForm />} />
           <Route path="/assets/tag/:tag" element={<AssetTagRedirect />} />
           <Route path="/assets/:id/edit" element={<AssetForm />} />

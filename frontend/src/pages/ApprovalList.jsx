@@ -112,6 +112,7 @@ export default function ApprovalList() {
                   <th>类型</th>
                   <th>申请人</th>
                   <th>领用人</th>
+                  <th>审批级别</th>
                   <th>状态</th>
                   <th>申请时间</th>
                   <th>操作</th>
@@ -127,6 +128,11 @@ export default function ApprovalList() {
                     <td>{a.applicant}</td>
                     <td>{a.assignee || '-'}</td>
                     <td>
+                      {a.total_levels > 1
+                        ? `${a.current_level}/${a.total_levels}`
+                        : '-'}
+                    </td>
+                    <td>
                       <span className={`status-badge status-${a.status}`}>
                         {STATUS_MAP[a.status]}
                       </span>
@@ -138,9 +144,9 @@ export default function ApprovalList() {
                       <div className="actions-cell">
                         <button
                           className="btn btn-outline btn-sm"
-                          onClick={() => navigate(`/assets/${a.asset_id}`)}
+                          onClick={() => navigate(`/approvals/${a.id}`)}
                         >
-                          资产详情
+                          详情
                         </button>
                         {a.status === 'pending' && (
                           <>
@@ -181,6 +187,9 @@ export default function ApprovalList() {
             <h3>{actionType === 'approve' ? '通过审批' : '驳回审批'}</h3>
             <p style={{ marginBottom: 16, fontSize: 14, color: 'var(--text-secondary)' }}>
               审批单 #{showActionModal.id} - {TYPE_MAP[showActionModal.approval_type]}
+              {showActionModal.total_levels > 1 && (
+                <span> (第{showActionModal.current_level}/{showActionModal.total_levels}级)</span>
+              )}
             </p>
             <div className="form-group" style={{ marginBottom: 16 }}>
               <label>审批意见</label>

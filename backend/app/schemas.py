@@ -129,11 +129,89 @@ class ApprovalResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ApprovalNodeRecordResponse(BaseModel):
+    id: int
+    approval_id: int
+    chain_node_id: int
+    level: int
+    approver_role: str
+    approver_name: str
+    status: ApprovalStatus
+    opinion: str | None
+    acted_at: datetime | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
 class ApprovalDetailResponse(ApprovalResponse):
     asset_name: str | None = None
     asset_tag: str | None = None
+    purchase_price: float | None = None
+    node_records: list[ApprovalNodeRecordResponse] = []
 
 
 class ApprovalListResponse(BaseModel):
     total: int
     items: list[ApprovalDetailResponse]
+
+
+class ChainNodeCreate(BaseModel):
+    approver_role: str = Field(..., max_length=64)
+    approver_name: str = Field(..., max_length=128)
+
+
+class ChainNodeUpdate(BaseModel):
+    approver_role: str | None = Field(None, max_length=64)
+    approver_name: str | None = Field(None, max_length=128)
+
+
+class ChainNodeResponse(BaseModel):
+    id: int
+    chain_id: int
+    level: int
+    approver_role: str
+    approver_name: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ApprovalChainCreate(BaseModel):
+    name: str = Field(..., max_length=128)
+    approval_type: ApprovalType
+    min_price: float | None = None
+    max_price: float | None = None
+    is_default: bool = False
+    nodes: list[ChainNodeCreate]
+
+
+class ApprovalChainUpdate(BaseModel):
+    name: str | None = Field(None, max_length=128)
+    min_price: float | None = None
+    max_price: float | None = None
+    is_default: bool | None = None
+    nodes: list[ChainNodeCreate] | None = None
+
+
+class ApprovalChainResponse(BaseModel):
+    id: int
+    name: str
+    approval_type: ApprovalType
+    min_price: float | None
+    max_price: float | None
+    is_default: bool
+    nodes: list[ChainNodeResponse] = []
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ApprovalChainListResponse(BaseModel):
+    total: int
+    items: list[ApprovalChainResponse]
+
+
+class ChainNodesReorder(BaseModel):
+    node_ids: list[int]

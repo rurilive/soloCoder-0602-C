@@ -4,8 +4,16 @@ import base64
 from datetime import datetime
 from sqlalchemy.orm import Session
 from fastapi import HTTPException
-from app.models import Asset, AssetLog, AssetStatus, AssetCategory, ImportLog, Approval, ApprovalType, ApprovalStatus
-from app.schemas import AssetCreate, AssetUpdate, AssetAllocate, AssetReturn, AssetScrap, ImportErrorItem, ApprovalCreate, ApprovalAction
+from app.models import (
+    Asset, AssetLog, AssetStatus, AssetCategory, ImportLog,
+    Approval, ApprovalType, ApprovalStatus,
+    ApprovalChain, ApprovalChainNode, ApprovalNodeRecord,
+)
+from app.schemas import (
+    AssetCreate, AssetUpdate, AssetAllocate, AssetReturn, AssetScrap,
+    ImportErrorItem, ApprovalCreate, ApprovalAction,
+    ApprovalChainCreate, ApprovalChainUpdate, ChainNodesReorder,
+)
 
 
 CATEGORY_CN_MAP: dict[str, AssetCategory] = {
@@ -345,6 +353,25 @@ def batch_import_assets(db: Session, file_bytes: bytes, file_name: str) -> dict:
     }
 
 
+def _find_matching_chain(db: Session, approval_type: ApprovalType, price: float | None) -> ApprovalChain | None:
+    chains = (
+        db.query(ApprovalChain)
+        .filter(ApprovalChain.approval_type == approval_type)
+        .order_by(ApprovalChain.is_default.asc())
+        .all()
+    )
+    for chain in chains:
+        if chain.min_price is not None and price is not None and price < chain.min_price:
+            continue
+        if chain.max_price is not None and price is not None and price > chain.max_price:
+            continue
+        return chain
+    for chain in chains:
+        if chain.is_default:
+            return chain
+    return chains[0] if chains else None
+
+
 def create_approval(db: Session, asset_id: int, data: ApprovalCreate) -> Approval:
     asset = get_asset(db, asset_id)
 
@@ -374,6 +401,20 @@ def create_approval(db: Session, asset_id: int, data: ApprovalCreate) -> Approva
     previous_status = asset.status
     asset.status = AssetStatus.PENDING_APPROVAL
 
+    chain = _find_matching_chain(db, data.approval_type, asset.purchase_price)
+    chain_id = None
+    total_levels = 1
+
+    if chain:
+        chain_id = chain.id
+        nodes = (
+            db.query(ApprovalChainNode)
+            .filter(ApprovalChainNode.chain_id == chain.id)
+            .order_by(ApprovalChainNode.level.asc())
+            .all()
+        )
+        total_levels = len(nodes) if nodes else 1
+
     approval = Approval(
         asset_id=asset_id,
         approval_type=data.approval_type,
@@ -382,15 +423,38 @@ def create_approval(db: Session, asset_id: int, data: ApprovalCreate) -> Approva
         assignee=data.assignee,
         reason=data.reason,
         previous_status=previous_status,
+        current_level=1,
+        total_levels=total_levels,
+        chain_id=chain_id,
     )
     db.add(approval)
+    db.flush()
+
+    if chain and chain_id:
+        nodes = (
+            db.query(ApprovalChainNode)
+            .filter(ApprovalChainNode.chain_id == chain.id)
+            .order_by(ApprovalChainNode.level.asc())
+            .all()
+        )
+        for idx, node in enumerate(nodes):
+            record = ApprovalNodeRecord(
+                approval_id=approval.id,
+                chain_node_id=node.id,
+                level=idx + 1,
+                approver_role=node.approver_role,
+                approver_name=node.approver_name,
+                status=ApprovalStatus.PENDING,
+            )
+            db.add(record)
 
     action_type = "领用申请" if data.approval_type == ApprovalType.ALLOCATE else "报废申请"
+    chain_info = f"（{total_levels}级审批链）" if total_levels > 1 else ""
     log = AssetLog(
         asset_id=asset_id,
         action=action_type,
         operator=data.applicant,
-        detail=data.reason or f"提交{action_type}",
+        detail=data.reason or f"提交{action_type}{chain_info}",
     )
     db.add(log)
 
@@ -450,6 +514,49 @@ def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approv
     if asset.status != AssetStatus.PENDING_APPROVAL:
         raise HTTPException(status_code=400, detail="资产状态异常，不是待审批状态")
 
+    now = datetime.now()
+
+    current_record = (
+        db.query(ApprovalNodeRecord)
+        .filter(
+            ApprovalNodeRecord.approval_id == approval_id,
+            ApprovalNodeRecord.level == approval.current_level,
+        )
+        .first()
+    )
+
+    if current_record:
+        if current_record.status != ApprovalStatus.PENDING:
+            raise HTTPException(status_code=400, detail="当前节点已处理，不可重复操作")
+        current_record.status = ApprovalStatus.APPROVED
+        current_record.opinion = data.opinion
+        current_record.acted_at = now
+
+        all_records = (
+            db.query(ApprovalNodeRecord)
+            .filter(ApprovalNodeRecord.approval_id == approval_id)
+            .order_by(ApprovalNodeRecord.level.asc())
+            .all()
+        )
+        next_level = approval.current_level + 1
+
+        if next_level <= approval.total_levels:
+            approval.current_level = next_level
+            approval.approver = approver
+            approval.approval_opinion = data.opinion
+
+            level_desc = f"第{approval.current_level - 1}/{approval.total_levels}级审批通过"
+            log = AssetLog(
+                asset_id=asset.id,
+                action="多级审批通过",
+                operator=approver,
+                detail=f"{level_desc}，审批人: {current_record.approver_name}。{data.opinion or ''}",
+            )
+            db.add(log)
+            db.commit()
+            db.refresh(approval)
+            return approval
+
     approval.status = ApprovalStatus.APPROVED
     approval.approver = approver
     approval.approval_opinion = data.opinion
@@ -487,6 +594,35 @@ def reject_approval(db: Session, approval_id: int, data: ApprovalAction, approve
     if asset.status != AssetStatus.PENDING_APPROVAL:
         raise HTTPException(status_code=400, detail="资产状态异常，不是待审批状态")
 
+    now = datetime.now()
+
+    current_record = (
+        db.query(ApprovalNodeRecord)
+        .filter(
+            ApprovalNodeRecord.approval_id == approval_id,
+            ApprovalNodeRecord.level == approval.current_level,
+        )
+        .first()
+    )
+
+    if current_record:
+        if current_record.status != ApprovalStatus.PENDING:
+            raise HTTPException(status_code=400, detail="当前节点已处理，不可重复操作")
+        current_record.status = ApprovalStatus.REJECTED
+        current_record.opinion = data.opinion
+        current_record.acted_at = now
+
+        remaining_records = (
+            db.query(ApprovalNodeRecord)
+            .filter(
+                ApprovalNodeRecord.approval_id == approval_id,
+                ApprovalNodeRecord.level > approval.current_level,
+            )
+            .all()
+        )
+        for r in remaining_records:
+            r.status = ApprovalStatus.REJECTED
+
     approval.status = ApprovalStatus.REJECTED
     approval.approver = approver
     approval.approval_opinion = data.opinion
@@ -494,8 +630,9 @@ def reject_approval(db: Session, approval_id: int, data: ApprovalAction, approve
     asset.status = approval.previous_status
 
     action_type = "领用" if approval.approval_type == ApprovalType.ALLOCATE else "报废"
+    level_info = f"（第{approval.current_level}/{approval.total_levels}级驳回）" if approval.total_levels > 1 else ""
     action = f"{action_type}审批驳回"
-    detail = f"审批驳回。{data.opinion or ''}"
+    detail = f"审批驳回{level_info}。{data.opinion or ''}"
 
     log = AssetLog(
         asset_id=asset.id,
@@ -508,3 +645,133 @@ def reject_approval(db: Session, approval_id: int, data: ApprovalAction, approve
     db.commit()
     db.refresh(approval)
     return approval
+
+
+def get_approval_node_records(db: Session, approval_id: int) -> list[ApprovalNodeRecord]:
+    return (
+        db.query(ApprovalNodeRecord)
+        .filter(ApprovalNodeRecord.approval_id == approval_id)
+        .order_by(ApprovalNodeRecord.level.asc())
+        .all()
+    )
+
+
+def create_approval_chain(db: Session, data: ApprovalChainCreate) -> ApprovalChain:
+    chain = ApprovalChain(
+        name=data.name,
+        approval_type=data.approval_type,
+        min_price=data.min_price,
+        max_price=data.max_price,
+        is_default=data.is_default,
+    )
+    db.add(chain)
+    db.flush()
+
+    for idx, node_data in enumerate(data.nodes):
+        node = ApprovalChainNode(
+            chain_id=chain.id,
+            level=idx + 1,
+            approver_role=node_data.approver_role,
+            approver_name=node_data.approver_name,
+        )
+        db.add(node)
+
+    db.commit()
+    db.refresh(chain)
+    return chain
+
+
+def get_approval_chains(
+    db: Session,
+    approval_type: ApprovalType | None = None,
+    page: int = 1,
+    page_size: int = 20,
+) -> tuple[list[ApprovalChain], int]:
+    query = db.query(ApprovalChain)
+    if approval_type:
+        query = query.filter(ApprovalChain.approval_type == approval_type)
+    total = query.count()
+    items = (
+        query.order_by(ApprovalChain.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+    return items, total
+
+
+def get_approval_chain(db: Session, chain_id: int) -> ApprovalChain:
+    chain = db.query(ApprovalChain).filter(ApprovalChain.id == chain_id).first()
+    if not chain:
+        raise HTTPException(status_code=404, detail="审批链不存在")
+    return chain
+
+
+def get_chain_nodes(db: Session, chain_id: int) -> list[ApprovalChainNode]:
+    return (
+        db.query(ApprovalChainNode)
+        .filter(ApprovalChainNode.chain_id == chain_id)
+        .order_by(ApprovalChainNode.level.asc())
+        .all()
+    )
+
+
+def update_approval_chain(db: Session, chain_id: int, data: ApprovalChainUpdate) -> ApprovalChain:
+    chain = get_approval_chain(db, chain_id)
+
+    if data.name is not None:
+        chain.name = data.name
+    if data.min_price is not None:
+        chain.min_price = data.min_price
+    if data.max_price is not None:
+        chain.max_price = data.max_price
+    if data.is_default is not None:
+        chain.is_default = data.is_default
+
+    if data.nodes is not None:
+        db.query(ApprovalChainNode).filter(ApprovalChainNode.chain_id == chain_id).delete()
+        for idx, node_data in enumerate(data.nodes):
+            node = ApprovalChainNode(
+                chain_id=chain_id,
+                level=idx + 1,
+                approver_role=node_data.approver_role,
+                approver_name=node_data.approver_name,
+            )
+            db.add(node)
+
+    db.commit()
+    db.refresh(chain)
+    return chain
+
+
+def delete_approval_chain(db: Session, chain_id: int) -> None:
+    chain = get_approval_chain(db, chain_id)
+    pending_approvals = (
+        db.query(Approval)
+        .filter(Approval.chain_id == chain_id, Approval.status == ApprovalStatus.PENDING)
+        .count()
+    )
+    if pending_approvals > 0:
+        raise HTTPException(status_code=400, detail="该审批链下有待处理的审批单，不可删除")
+    db.query(ApprovalChainNode).filter(ApprovalChainNode.chain_id == chain_id).delete()
+    db.delete(chain)
+    db.commit()
+
+
+def reorder_chain_nodes(db: Session, chain_id: int, data: ChainNodesReorder) -> ApprovalChain:
+    chain = get_approval_chain(db, chain_id)
+
+    existing_nodes = get_chain_nodes(db, chain_id)
+    existing_ids = {n.id for n in existing_nodes}
+
+    if set(data.node_ids) != existing_ids:
+        raise HTTPException(status_code=400, detail="节点ID与当前审批链节点不匹配")
+
+    for new_level, node_id in enumerate(data.node_ids, start=1):
+        node = next((n for n in existing_nodes if n.id == node_id), None)
+        if node:
+            node.level = new_level
+
+    db.commit()
+    db.refresh(chain)
+    return chain
