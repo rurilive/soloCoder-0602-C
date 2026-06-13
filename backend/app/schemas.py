@@ -123,6 +123,9 @@ class ApprovalResponse(BaseModel):
     approver: str | None
     approval_opinion: str | None
     previous_status: AssetStatus
+    current_level: int
+    total_levels: int
+    chain_id: int | None
     created_at: datetime
     updated_at: datetime
 

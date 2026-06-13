@@ -542,8 +542,6 @@ def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approv
 
         if next_level <= approval.total_levels:
             approval.current_level = next_level
-            approval.approver = approver
-            approval.approval_opinion = data.opinion
 
             level_desc = f"第{approval.current_level - 1}/{approval.total_levels}级审批通过"
             log = AssetLog(
