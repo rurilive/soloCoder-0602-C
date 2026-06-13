@@ -181,6 +181,10 @@ table tr:hover td {
 .status-allocated { background: #e8f0fe; color: #1a73e8; }
 .status-returned { background: #fef7e0; color: #b06000; }
 .status-scrapped { background: #fce8e6; color: #d93025; }
+.status-pending_approval { background: #e8f0fe; color: #1a73e8; }
+.status-pending { background: #e8f0fe; color: #1a73e8; }
+.status-approved { background: #e6f4ea; color: #1e8e3e; }
+.status-rejected { background: #fce8e6; color: #d93025; }
 
 .form-grid {
   display: grid;

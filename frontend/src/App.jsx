@@ -5,6 +5,7 @@ import AssetDetail from './pages/AssetDetail'
 import AssetScan from './pages/AssetScan'
 import AssetTagRedirect from './pages/AssetTagRedirect'
 import AssetImport from './pages/AssetImport'
+import ApprovalList from './pages/ApprovalList'
 
 export default function App() {
   return (
@@ -13,6 +14,7 @@ export default function App() {
         <h1>企业内部资产管理系统</h1>
         <nav>
           <NavLink to="/" end className={({ isActive }) => isActive ? 'active' : ''}>资产列表</NavLink>
+          <NavLink to="/approvals" className={({ isActive }) => isActive ? 'active' : ''}>审批管理</NavLink>
           <NavLink to="/assets/new" className={({ isActive }) => isActive ? 'active' : ''}>资产入库</NavLink>
           <NavLink to="/import" className={({ isActive }) => isActive ? 'active' : ''}>批量导入</NavLink>
           <NavLink to="/scan" className={({ isActive }) => isActive ? 'active' : ''}>扫码查询</NavLink>
@@ -21,6 +23,7 @@ export default function App() {
       <main className="app-main">
         <Routes>
           <Route path="/" element={<AssetList />} />
+          <Route path="/approvals" element={<ApprovalList />} />
           <Route path="/assets/new" element={<AssetForm />} />
           <Route path="/assets/tag/:tag" element={<AssetTagRedirect />} />
           <Route path="/assets/:id/edit" element={<AssetForm />} />

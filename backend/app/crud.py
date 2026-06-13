@@ -4,8 +4,8 @@ import base64
 from datetime import datetime
 from sqlalchemy.orm import Session
 from fastapi import HTTPException
-from app.models import Asset, AssetLog, AssetStatus, AssetCategory, ImportLog
-from app.schemas import AssetCreate, AssetUpdate, AssetAllocate, AssetReturn, AssetScrap, ImportErrorItem
+from app.models import Asset, AssetLog, AssetStatus, AssetCategory, ImportLog, Approval, ApprovalType, ApprovalStatus
+from app.schemas import AssetCreate, AssetUpdate, AssetAllocate, AssetReturn, AssetScrap, ImportErrorItem, ApprovalCreate, ApprovalAction
 
 
 CATEGORY_CN_MAP: dict[str, AssetCategory] = {
@@ -155,21 +155,15 @@ def update_asset(db: Session, asset_id: int, data: AssetUpdate) -> Asset:
 
 
 def allocate_asset(db: Session, asset_id: int, data: AssetAllocate) -> Asset:
-    asset = get_asset(db, asset_id)
-    if asset.status != AssetStatus.IN_STOCK and asset.status != AssetStatus.RETURNED:
-        raise HTTPException(status_code=400, detail=f"资产当前状态为 {asset.status.value}，无法领用")
-    asset.status = AssetStatus.ALLOCATED
-    asset.assignee = data.assignee
-    log = AssetLog(
-        asset_id=asset.id,
-        action="领用",
-        operator=data.assignee,
-        detail=f"领用人: {data.assignee}",
+    from app.schemas import ApprovalCreate
+    approval_data = ApprovalCreate(
+        approval_type=ApprovalType.ALLOCATE,
+        applicant=data.assignee,
+        assignee=data.assignee,
+        reason="资产领用申请",
     )
-    db.add(log)
-    db.commit()
-    db.refresh(asset)
-    return asset
+    create_approval(db, asset_id, approval_data)
+    return get_asset(db, asset_id)
 
 
 def return_asset(db: Session, asset_id: int, data: AssetReturn) -> Asset:
@@ -192,21 +186,14 @@ def return_asset(db: Session, asset_id: int, data: AssetReturn) -> Asset:
 
 
 def scrap_asset(db: Session, asset_id: int, data: AssetScrap) -> Asset:
-    asset = get_asset(db, asset_id)
-    if asset.status == AssetStatus.SCRAPPED:
-        raise HTTPException(status_code=400, detail="资产已报废")
-    asset.status = AssetStatus.SCRAPPED
-    asset.assignee = None
-    log = AssetLog(
-        asset_id=asset.id,
-        action="报废",
-        operator="admin",
-        detail=data.notes or "资产报废",
+    from app.schemas import ApprovalCreate
+    approval_data = ApprovalCreate(
+        approval_type=ApprovalType.SCRAP,
+        applicant="admin",
+        reason=data.notes or "资产报废申请",
     )
-    db.add(log)
-    db.commit()
-    db.refresh(asset)
-    return asset
+    create_approval(db, asset_id, approval_data)
+    return get_asset(db, asset_id)
 
 
 def get_asset_logs(db: Session, asset_id: int) -> list[AssetLog]:
@@ -358,3 +345,168 @@ def batch_import_assets(db: Session, file_bytes: bytes, file_name: str) -> dict:
         "success_count": len(data_rows),
         "errors": [],
     }
+
+
+def create_approval(db: Session, asset_id: int, data: ApprovalCreate) -> Approval:
+    asset = get_asset(db, asset_id)
+
+    if asset.status == AssetStatus.PENDING_APPROVAL:
+        raise HTTPException(status_code=400, detail="资产已处于待审批状态，不可重复提交")
+
+    pending_approval = (
+        db.query(Approval)
+        .filter(
+            Approval.asset_id == asset_id,
+            Approval.status == ApprovalStatus.PENDING,
+        )
+        .first()
+    )
+    if pending_approval:
+        raise HTTPException(status_code=400, detail="该资产已有待处理的审批单，不可重复提交")
+
+    if data.approval_type == ApprovalType.ALLOCATE:
+        if asset.status != AssetStatus.IN_STOCK and asset.status != AssetStatus.RETURNED:
+            raise HTTPException(status_code=400, detail=f"资产当前状态为 {asset.status.value}，无法申请领用")
+        if not data.assignee:
+            raise HTTPException(status_code=400, detail="领用审批必须指定领用人")
+    elif data.approval_type == ApprovalType.SCRAP:
+        if asset.status == AssetStatus.SCRAPPED:
+            raise HTTPException(status_code=400, detail="资产已报废，不可重复申请")
+
+    previous_status = asset.status
+    asset.status = AssetStatus.PENDING_APPROVAL
+
+    approval = Approval(
+        asset_id=asset_id,
+        approval_type=data.approval_type,
+        status=ApprovalStatus.PENDING,
+        applicant=data.applicant,
+        assignee=data.assignee,
+        reason=data.reason,
+        previous_status=previous_status,
+    )
+    db.add(approval)
+
+    action_type = "领用申请" if data.approval_type == ApprovalType.ALLOCATE else "报废申请"
+    log = AssetLog(
+        asset_id=asset_id,
+        action=action_type,
+        operator=data.applicant,
+        detail=data.reason or f"提交{action_type}",
+    )
+    db.add(log)
+
+    db.commit()
+    db.refresh(approval)
+    return approval
+
+
+def get_approvals(
+    db: Session,
+    status: ApprovalStatus | None = None,
+    approval_type: ApprovalType | None = None,
+    keyword: str | None = None,
+    page: int = 1,
+    page_size: int = 20,
+) -> tuple[list[Approval], int]:
+    query = db.query(Approval)
+    if status:
+        query = query.filter(Approval.status == status)
+    if approval_type:
+        query = query.filter(Approval.approval_type == approval_type)
+    if keyword:
+        like = f"%{keyword}%"
+        asset_ids = db.query(Asset.id).filter(
+            (Asset.name.like(like))
+            | (Asset.asset_tag.like(like))
+            | (Asset.serial_number.like(like))
+        ).all()
+        asset_id_list = [aid[0] for aid in asset_ids]
+        if asset_id_list:
+            query = query.filter(Approval.asset_id.in_(asset_id_list))
+        else:
+            return [], 0
+    total = query.count()
+    items = (
+        query.order_by(Approval.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+    return items, total
+
+
+def get_approval(db: Session, approval_id: int) -> Approval:
+    approval = db.query(Approval).filter(Approval.id == approval_id).first()
+    if not approval:
+        raise HTTPException(status_code=404, detail="审批单不存在")
+    return approval
+
+
+def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approver: str = "admin") -> Approval:
+    approval = get_approval(db, approval_id)
+    if approval.status != ApprovalStatus.PENDING:
+        raise HTTPException(status_code=400, detail="审批单已处理，不可重复操作")
+
+    asset = get_asset(db, approval.asset_id)
+    if asset.status != AssetStatus.PENDING_APPROVAL:
+        raise HTTPException(status_code=400, detail="资产状态异常，不是待审批状态")
+
+    approval.status = ApprovalStatus.APPROVED
+    approval.approver = approver
+    approval.approval_opinion = data.opinion
+
+    if approval.approval_type == ApprovalType.ALLOCATE:
+        asset.status = AssetStatus.ALLOCATED
+        asset.assignee = approval.assignee
+        action = "领用审批通过"
+        detail = f"审批通过，领用人: {approval.assignee}。{data.opinion or ''}"
+    elif approval.approval_type == ApprovalType.SCRAP:
+        asset.status = AssetStatus.SCRAPPED
+        asset.assignee = None
+        action = "报废审批通过"
+        detail = f"审批通过。{data.opinion or ''}"
+
+    log = AssetLog(
+        asset_id=asset.id,
+        action=action,
+        operator=approver,
+        detail=detail,
+    )
+    db.add(log)
+
+    db.commit()
+    db.refresh(approval)
+    return approval
+
+
+def reject_approval(db: Session, approval_id: int, data: ApprovalAction, approver: str = "admin") -> Approval:
+    approval = get_approval(db, approval_id)
+    if approval.status != ApprovalStatus.PENDING:
+        raise HTTPException(status_code=400, detail="审批单已处理，不可重复操作")
+
+    asset = get_asset(db, approval.asset_id)
+    if asset.status != AssetStatus.PENDING_APPROVAL:
+        raise HTTPException(status_code=400, detail="资产状态异常，不是待审批状态")
+
+    approval.status = ApprovalStatus.REJECTED
+    approval.approver = approver
+    approval.approval_opinion = data.opinion
+
+    asset.status = approval.previous_status
+
+    action_type = "领用" if approval.approval_type == ApprovalType.ALLOCATE else "报废"
+    action = f"{action_type}审批驳回"
+    detail = f"审批驳回。{data.opinion or ''}"
+
+    log = AssetLog(
+        asset_id=asset.id,
+        action=action,
+        operator=approver,
+        detail=detail,
+    )
+    db.add(log)
+
+    db.commit()
+    db.refresh(approval)
+    return approval

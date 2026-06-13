@@ -7,6 +7,7 @@ const STATUS_MAP = {
   allocated: '已领用',
   returned: '已归还',
   scrapped: '已报废',
+  pending_approval: '待审批',
 }
 
 const CATEGORY_MAP = {

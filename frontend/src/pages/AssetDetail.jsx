@@ -8,6 +8,7 @@ const STATUS_MAP = {
   allocated: '已领用',
   returned: '已归还',
   scrapped: '已报废',
+  pending_approval: '待审批',
 }
 
 const CATEGORY_MAP = {
@@ -47,9 +48,10 @@ export default function AssetDetail() {
       await allocateAsset(id, { assignee: assignee.trim() })
       setShowAllocateModal(false)
       setAssignee('')
+      alert('领用申请已提交，请等待审批')
       fetchData()
     } catch (err) {
-      alert(err.response?.data?.detail || '领用失败')
+      alert(err.response?.data?.detail || '领用申请提交失败')
     }
   }
 
@@ -67,9 +69,10 @@ export default function AssetDetail() {
       await scrapAsset(id, { notes: scrapNote || '资产报废' })
       setShowScrapModal(false)
       setScrapNote('')
+      alert('报废申请已提交，请等待审批')
       fetchData()
     } catch (err) {
-      alert(err.response?.data?.detail || '报废失败')
+      alert(err.response?.data?.detail || '报废申请提交失败')
     }
   }
 
@@ -78,16 +81,18 @@ export default function AssetDetail() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
         <h2>资产详情</h2>
         <div style={{ display: 'flex', gap: 8 }}>
-          {asset.status === 'in_stock' && (
-            <button className="btn btn-primary" onClick={() => setShowAllocateModal(true)}>领用</button>
+          {asset.status === 'pending_approval' && (
+            <span className="status-badge status-pending" style={{ padding: '6px 12px' }}>
+              待审批中，审批通过后执行状态变更
+            </span>
           )}
-          {asset.status === 'returned' && (
+          {(asset.status === 'in_stock' || asset.status === 'returned') && (
             <button className="btn btn-primary" onClick={() => setShowAllocateModal(true)}>领用</button>
           )}
           {asset.status === 'allocated' && (
             <button className="btn btn-success" onClick={handleReturn}>归还</button>
           )}
-          {asset.status !== 'scrapped' && (
+          {asset.status !== 'scrapped' && asset.status !== 'pending_approval' && (
             <button className="btn btn-danger" onClick={() => setShowScrapModal(true)}>报废</button>
           )}
           <button className="btn btn-outline" onClick={() => navigate(`/assets/${id}/edit`)}>编辑</button>

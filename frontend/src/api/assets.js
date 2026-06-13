@@ -16,6 +16,12 @@ export const scrapAsset = (id, data) => api.post(`/assets/${id}/scrap`, data)
 export const getAssetLogs = (id) => api.get(`/assets/${id}/logs`)
 export const getAssetQrCode = (id) => api.get(`/assets/${id}/qrcode`)
 
+export const getApprovals = (params) => api.get('/approvals', { params })
+export const getApproval = (id) => api.get(`/approvals/${id}`)
+export const approveApproval = (id, data) => api.post(`/approvals/${id}/approve`, data)
+export const rejectApproval = (id, data) => api.post(`/approvals/${id}/reject`, data)
+export const createApproval = (assetId, data) => api.post(`/approvals/asset/${assetId}`, data)
+
 export const importAssets = (file, onUploadProgress) => {
   const formData = new FormData()
   formData.append('file', file)

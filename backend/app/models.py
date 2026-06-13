@@ -10,6 +10,18 @@ class AssetStatus(str, enum.Enum):
     ALLOCATED = "allocated"
     RETURNED = "returned"
     SCRAPPED = "scrapped"
+    PENDING_APPROVAL = "pending_approval"
+
+
+class ApprovalType(str, enum.Enum):
+    ALLOCATE = "allocate"
+    SCRAP = "scrap"
+
+
+class ApprovalStatus(str, enum.Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
 
 
 class AssetCategory(str, enum.Enum):
@@ -37,6 +49,23 @@ class Asset(Base):
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     purchase_date: Mapped[str | None] = mapped_column(String(32), nullable=True)
     purchase_price: Mapped[float | None] = mapped_column(nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+
+
+class Approval(Base):
+    __tablename__ = "approvals"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    asset_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    approval_type: Mapped[ApprovalType] = mapped_column(Enum(ApprovalType), nullable=False)
+    status: Mapped[ApprovalStatus] = mapped_column(Enum(ApprovalStatus), default=ApprovalStatus.PENDING, nullable=False)
+    applicant: Mapped[str] = mapped_column(String(128), nullable=False)
+    assignee: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    approver: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    approval_opinion: Mapped[str | None] = mapped_column(Text, nullable=True)
+    previous_status: Mapped[AssetStatus] = mapped_column(Enum(AssetStatus), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
 

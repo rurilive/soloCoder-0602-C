@@ -1,6 +1,6 @@
 from datetime import datetime
 from pydantic import BaseModel, Field
-from app.models import AssetStatus, AssetCategory
+from app.models import AssetStatus, AssetCategory, ApprovalType, ApprovalStatus
 
 
 class AssetCreate(BaseModel):
@@ -99,3 +99,41 @@ class ImportLogResponse(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class ApprovalCreate(BaseModel):
+    approval_type: ApprovalType
+    applicant: str = Field(..., max_length=128)
+    assignee: str | None = Field(None, max_length=128)
+    reason: str | None = None
+
+
+class ApprovalAction(BaseModel):
+    opinion: str | None = None
+
+
+class ApprovalResponse(BaseModel):
+    id: int
+    asset_id: int
+    approval_type: ApprovalType
+    status: ApprovalStatus
+    applicant: str
+    assignee: str | None
+    reason: str | None
+    approver: str | None
+    approval_opinion: str | None
+    previous_status: AssetStatus
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ApprovalDetailResponse(ApprovalResponse):
+    asset_name: str | None = None
+    asset_tag: str | None = None
+
+
+class ApprovalListResponse(BaseModel):
+    total: int
+    items: list[ApprovalDetailResponse]
