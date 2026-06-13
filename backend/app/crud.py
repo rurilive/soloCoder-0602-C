@@ -155,7 +155,6 @@ def update_asset(db: Session, asset_id: int, data: AssetUpdate) -> Asset:
 
 
 def allocate_asset(db: Session, asset_id: int, data: AssetAllocate) -> Asset:
-    from app.schemas import ApprovalCreate
     approval_data = ApprovalCreate(
         approval_type=ApprovalType.ALLOCATE,
         applicant=data.assignee,
@@ -186,7 +185,6 @@ def return_asset(db: Session, asset_id: int, data: AssetReturn) -> Asset:
 
 
 def scrap_asset(db: Session, asset_id: int, data: AssetScrap) -> Asset:
-    from app.schemas import ApprovalCreate
     approval_data = ApprovalCreate(
         approval_type=ApprovalType.SCRAP,
         applicant="admin",
