@@ -3,15 +3,21 @@ import io
 import base64
 import logging
 from datetime import datetime, timedelta
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from fastapi import HTTPException
 from app.models import (
     Asset, AssetLog, AssetStatus, AssetCategory, ImportLog,
     Approval, ApprovalType, ApprovalStatus, ApprovalMode,
     ApprovalChain, ApprovalChainNode, ApprovalChainNodeApprover, ApprovalNodeRecord,
+    ApprovalChainCondition, ApprovalChainConditionRule,
     ApprovalProxy, ApprovalReminder, OperationLog,
     User, Role, UserRole,
     Notification, NotificationType,
+)
+from app.condition_engine import (
+    ConditionEvaluationContext,
+    resolve_next_level,
+    detect_cycle,
 )
 
 logger = logging.getLogger(__name__)
@@ -487,6 +493,15 @@ def _user_is_approver_for_node(db: Session, user_id: int, node_record: ApprovalN
     return node_record.approver_role in user_role_codes
 
 
+def _get_applicant_department(db: Session, applicant_name: str) -> str | None:
+    user = (
+        db.query(User)
+        .filter((User.real_name == applicant_name) | (User.username == applicant_name))
+        .first()
+    )
+    return user.department if user else None
+
+
 def create_approval(db: Session, asset_id: int, data: ApprovalCreate, applicant: User | None = None) -> Approval:
     asset = get_asset(db, asset_id)
 
@@ -520,15 +535,51 @@ def create_approval(db: Session, asset_id: int, data: ApprovalCreate, applicant:
     chain_id = None
     total_levels = 1
 
+    chain_nodes_by_level: dict[int, ApprovalChainNode] = {}
+    resolved_path_levels: list[int] = []
+
     if chain:
         chain_id = chain.id
-        nodes = (
+        all_nodes = (
             db.query(ApprovalChainNode)
+            .options(
+                joinedload(ApprovalChainNode.approvers),
+                joinedload(ApprovalChainNode.conditions).joinedload(ApprovalChainCondition.rules),
+            )
             .filter(ApprovalChainNode.chain_id == chain.id)
             .order_by(ApprovalChainNode.level.asc())
             .all()
         )
-        total_levels = len(nodes) if nodes else 1
+        for n in all_nodes:
+            chain_nodes_by_level[n.level] = n
+
+        all_levels = set(chain_nodes_by_level.keys())
+
+        applicant_department = _get_applicant_department(db, data.applicant)
+        ctx = ConditionEvaluationContext(
+            price=asset.purchase_price,
+            category=asset.category,
+            applicant_department=applicant_department,
+        )
+
+        visited: set[int] = set()
+        current_level = 1
+        max_iterations = len(all_levels) * 2 + 10
+        iterations = 0
+        while current_level is not None and current_level in all_levels and iterations < max_iterations:
+            iterations += 1
+            if current_level in visited:
+                logger.warning(
+                    "审批单创建时检测到路径环路，中断路径生成: chain_id=%s, level=%s",
+                    chain.id, current_level,
+                )
+                break
+            visited.add(current_level)
+            resolved_path_levels.append(current_level)
+            node = chain_nodes_by_level[current_level]
+            current_level = resolve_next_level(node, ctx, all_levels)
+
+        total_levels = len(resolved_path_levels) if resolved_path_levels else 1
 
     approval = Approval(
         asset_id=asset_id,
@@ -545,28 +596,25 @@ def create_approval(db: Session, asset_id: int, data: ApprovalCreate, applicant:
     db.add(approval)
     db.flush()
 
-    if chain and chain_id:
-        from sqlalchemy.orm import joinedload
-        nodes = (
-            db.query(ApprovalChainNode)
-            .options(joinedload(ApprovalChainNode.approvers))
-            .filter(ApprovalChainNode.chain_id == chain.id)
-            .order_by(ApprovalChainNode.level.asc())
-            .all()
-        )
+    if chain and chain_id and resolved_path_levels:
         now = datetime.now()
-        for idx, node in enumerate(nodes):
-            if not node.approvers:
-                raise HTTPException(status_code=500, detail=f"审批链节点（level={idx + 1}）缺少审批人配置")
+        for path_idx, level in enumerate(resolved_path_levels):
+            node = chain_nodes_by_level.get(level)
+            if not node or not node.approvers:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"审批链节点（level={level}）缺少审批人配置",
+                )
+            record_level = path_idx + 1
             timeout_at = None
-            if idx == 0 and node.timeout_minutes is not None:
+            if path_idx == 0 and node.timeout_minutes is not None:
                 timeout_at = now + timedelta(minutes=node.timeout_minutes)
             for approver in node.approvers:
                 record = ApprovalNodeRecord(
                     approval_id=approval.id,
                     chain_node_id=node.id,
                     chain_node_approver_id=approver.id,
-                    level=idx + 1,
+                    level=record_level,
                     approver_role=approver.approver_role,
                     approver_name=approver.approver_name,
                     status=ApprovalStatus.PENDING,
@@ -1567,7 +1615,79 @@ def get_approval_node_records(db: Session, approval_id: int) -> list[ApprovalNod
     )
 
 
+def _save_node_conditions(
+    db: Session,
+    node_id: int,
+    conditions_data: list,
+) -> None:
+    for cond_data in conditions_data:
+        condition = ApprovalChainCondition(
+            chain_node_id=node_id,
+            target_level=cond_data.target_level,
+            logic=cond_data.logic,
+            priority=cond_data.priority,
+        )
+        db.add(condition)
+        db.flush()
+        for rule_data in cond_data.rules:
+            rule = ApprovalChainConditionRule(
+                condition_id=condition.id,
+                field=rule_data.field,
+                operator=rule_data.operator,
+                value=rule_data.value,
+            )
+            db.add(rule)
+
+
+def _build_temp_nodes_for_cycle_check(data_nodes: list) -> list:
+    temp_nodes = []
+    for idx, node_data in enumerate(data_nodes):
+        level = idx + 1
+        temp_conditions = []
+        for cond_data in (node_data.conditions or []):
+            temp_rules = [
+                ApprovalChainConditionRule(
+                    id=i,
+                    condition_id=0,
+                    field=r.field,
+                    operator=r.operator,
+                    value=r.value,
+                )
+                for i, r in enumerate(cond_data.rules or [])
+            ]
+            temp_conditions.append(
+                ApprovalChainCondition(
+                    id=len(temp_conditions),
+                    chain_node_id=0,
+                    target_level=cond_data.target_level,
+                    logic=cond_data.logic,
+                    priority=cond_data.priority,
+                    rules=temp_rules,
+                )
+            )
+        temp_node = ApprovalChainNode(
+            id=idx,
+            chain_id=0,
+            level=level,
+            mode=node_data.mode,
+            timeout_minutes=node_data.timeout_minutes,
+            default_next_level=getattr(node_data, "default_next_level", None),
+            conditions=temp_conditions,
+        )
+        temp_nodes.append(temp_node)
+    return temp_nodes
+
+
 def create_approval_chain(db: Session, data: ApprovalChainCreate) -> ApprovalChain:
+    temp_nodes = _build_temp_nodes_for_cycle_check(data.nodes)
+    cycle = detect_cycle(temp_nodes)
+    if cycle:
+        cycle_str = " → ".join(f"L{l}" for l in cycle)
+        raise HTTPException(
+            status_code=400,
+            detail=f"审批链存在环路：{cycle_str}，请检查条件分支配置",
+        )
+
     chain = ApprovalChain(
         name=data.name,
         approval_type=data.approval_type,
@@ -1589,6 +1709,7 @@ def create_approval_chain(db: Session, data: ApprovalChainCreate) -> ApprovalCha
             level=idx + 1,
             mode=node_data.mode,
             timeout_minutes=node_data.timeout_minutes,
+            default_next_level=node_data.default_next_level,
         )
         db.add(node)
         db.flush()
@@ -1600,6 +1721,9 @@ def create_approval_chain(db: Session, data: ApprovalChainCreate) -> ApprovalCha
                 approver_name=approver_data.approver_name,
             )
             db.add(approver)
+
+        if node_data.conditions:
+            _save_node_conditions(db, node.id, node_data.conditions)
 
     db.commit()
     db.refresh(chain)
@@ -1633,10 +1757,12 @@ def get_approval_chain(db: Session, chain_id: int) -> ApprovalChain:
 
 
 def get_chain_nodes(db: Session, chain_id: int) -> list[ApprovalChainNode]:
-    from sqlalchemy.orm import joinedload
     return (
         db.query(ApprovalChainNode)
-        .options(joinedload(ApprovalChainNode.approvers))
+        .options(
+            joinedload(ApprovalChainNode.approvers),
+            joinedload(ApprovalChainNode.conditions).joinedload(ApprovalChainCondition.rules),
+        )
         .filter(ApprovalChainNode.chain_id == chain_id)
         .order_by(ApprovalChainNode.level.asc())
         .all()
@@ -1656,12 +1782,37 @@ def update_approval_chain(db: Session, chain_id: int, data: ApprovalChainUpdate)
         chain.is_default = data.is_default
 
     if data.nodes is not None:
-        db.query(ApprovalChainNodeApprover).filter(
-            ApprovalChainNodeApprover.chain_node_id.in_(
-                db.query(ApprovalChainNode.id).filter(ApprovalChainNode.chain_id == chain_id)
+        temp_nodes = _build_temp_nodes_for_cycle_check(data.nodes)
+        cycle = detect_cycle(temp_nodes)
+        if cycle:
+            cycle_str = " → ".join(f"L{l}" for l in cycle)
+            raise HTTPException(
+                status_code=400,
+                detail=f"审批链存在环路：{cycle_str}，请检查条件分支配置",
             )
-        ).delete(synchronize_session=False)
-        db.query(ApprovalChainNode).filter(ApprovalChainNode.chain_id == chain_id).delete()
+
+        existing_node_ids = [
+            n.id for n in db.query(ApprovalChainNode.id)
+            .filter(ApprovalChainNode.chain_id == chain_id).all()
+        ]
+        if existing_node_ids:
+            condition_ids = [
+                c.id for c in db.query(ApprovalChainCondition.id)
+                .filter(ApprovalChainCondition.chain_node_id.in_(existing_node_ids)).all()
+            ]
+            if condition_ids:
+                db.query(ApprovalChainConditionRule).filter(
+                    ApprovalChainConditionRule.condition_id.in_(condition_ids)
+                ).delete(synchronize_session=False)
+            db.query(ApprovalChainCondition).filter(
+                ApprovalChainCondition.chain_node_id.in_(existing_node_ids)
+            ).delete(synchronize_session=False)
+            db.query(ApprovalChainNodeApprover).filter(
+                ApprovalChainNodeApprover.chain_node_id.in_(existing_node_ids)
+            ).delete(synchronize_session=False)
+            db.query(ApprovalChainNode).filter(
+                ApprovalChainNode.chain_id == chain_id
+            ).delete()
 
         for idx, node_data in enumerate(data.nodes):
             if not node_data.approvers:
@@ -1674,6 +1825,7 @@ def update_approval_chain(db: Session, chain_id: int, data: ApprovalChainUpdate)
                 level=idx + 1,
                 mode=node_data.mode,
                 timeout_minutes=node_data.timeout_minutes,
+                default_next_level=node_data.default_next_level,
             )
             db.add(node)
             db.flush()
@@ -1685,6 +1837,9 @@ def update_approval_chain(db: Session, chain_id: int, data: ApprovalChainUpdate)
                     approver_name=approver_data.approver_name,
                 )
                 db.add(approver)
+
+            if node_data.conditions:
+                _save_node_conditions(db, node.id, node_data.conditions)
 
     db.commit()
     db.refresh(chain)
@@ -1700,11 +1855,26 @@ def delete_approval_chain(db: Session, chain_id: int) -> None:
     )
     if pending_approvals > 0:
         raise HTTPException(status_code=400, detail="该审批链下有待处理的审批单，不可删除")
-    db.query(ApprovalChainNodeApprover).filter(
-        ApprovalChainNodeApprover.chain_node_id.in_(
-            db.query(ApprovalChainNode.id).filter(ApprovalChainNode.chain_id == chain_id)
-        )
-    ).delete(synchronize_session=False)
+
+    existing_node_ids = [
+        n.id for n in db.query(ApprovalChainNode.id)
+        .filter(ApprovalChainNode.chain_id == chain_id).all()
+    ]
+    if existing_node_ids:
+        condition_ids = [
+            c.id for c in db.query(ApprovalChainCondition.id)
+            .filter(ApprovalChainCondition.chain_node_id.in_(existing_node_ids)).all()
+        ]
+        if condition_ids:
+            db.query(ApprovalChainConditionRule).filter(
+                ApprovalChainConditionRule.condition_id.in_(condition_ids)
+            ).delete(synchronize_session=False)
+        db.query(ApprovalChainCondition).filter(
+            ApprovalChainCondition.chain_node_id.in_(existing_node_ids)
+        ).delete(synchronize_session=False)
+        db.query(ApprovalChainNodeApprover).filter(
+            ApprovalChainNodeApprover.chain_node_id.in_(existing_node_ids)
+        ).delete(synchronize_session=False)
     db.query(ApprovalChainNode).filter(ApprovalChainNode.chain_id == chain_id).delete()
     db.delete(chain)
     db.commit()

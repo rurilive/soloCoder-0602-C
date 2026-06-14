@@ -1,8 +1,32 @@
 import enum
 from datetime import datetime
-from sqlalchemy import String, Enum, DateTime, Text, Integer, ForeignKey, Boolean, UniqueConstraint
+from sqlalchemy import String, Enum, DateTime, Text, Integer, ForeignKey, Boolean, UniqueConstraint, JSON, Float
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
+
+
+class ConditionOperator(str, enum.Enum):
+    EQ = "eq"
+    NE = "ne"
+    GT = "gt"
+    GTE = "gte"
+    LT = "lt"
+    LTE = "lte"
+    IN = "in"
+    NOT_IN = "not_in"
+    BETWEEN = "between"
+    CONTAINS = "contains"
+
+
+class ConditionField(str, enum.Enum):
+    PRICE = "price"
+    CATEGORY = "category"
+    APPLICANT_DEPARTMENT = "applicant_department"
+
+
+class ConditionLogic(str, enum.Enum):
+    AND = "and"
+    OR = "or"
 
 
 class AssetStatus(str, enum.Enum):
@@ -92,11 +116,17 @@ class ApprovalChainNode(Base):
     level: Mapped[int] = mapped_column(Integer, nullable=False)
     mode: Mapped[ApprovalMode] = mapped_column(Enum(ApprovalMode), default=ApprovalMode.SINGLE, nullable=False)
     timeout_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    default_next_level: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
 
     approvers: Mapped[list["ApprovalChainNodeApprover"]] = relationship(
         "ApprovalChainNodeApprover",
         back_populates="chain_node",
+        cascade="all, delete-orphan",
+    )
+
+    conditions: Mapped[list["ApprovalChainCondition"]] = relationship(
+        "ApprovalChainCondition",
         cascade="all, delete-orphan",
     )
 
@@ -110,7 +140,37 @@ class ApprovalChainNodeApprover(Base):
     approver_name: Mapped[str] = mapped_column(String(128), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
 
-    chain_node: Mapped[ApprovalChainNode] = relationship("ApprovalChainNode", back_populates="approvers")
+    chain_node: Mapped["ApprovalChainNode"] = relationship("ApprovalChainNode", back_populates="approvers")
+
+
+class ApprovalChainCondition(Base):
+    __tablename__ = "approval_chain_conditions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chain_node_id: Mapped[int] = mapped_column(Integer, ForeignKey("approval_chain_nodes.id"), nullable=False, index=True)
+    target_level: Mapped[int] = mapped_column(Integer, nullable=False)
+    logic: Mapped[ConditionLogic] = mapped_column(Enum(ConditionLogic), default=ConditionLogic.AND, nullable=False)
+    priority: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
+
+    rules: Mapped[list["ApprovalChainConditionRule"]] = relationship(
+        "ApprovalChainConditionRule",
+        back_populates="condition",
+        cascade="all, delete-orphan",
+    )
+
+
+class ApprovalChainConditionRule(Base):
+    __tablename__ = "approval_chain_condition_rules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    condition_id: Mapped[int] = mapped_column(Integer, ForeignKey("approval_chain_conditions.id"), nullable=False, index=True)
+    field: Mapped[ConditionField] = mapped_column(Enum(ConditionField), nullable=False)
+    operator: Mapped[ConditionOperator] = mapped_column(Enum(ConditionOperator), nullable=False)
+    value: Mapped[dict | list | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
+
+    condition: Mapped["ApprovalChainCondition"] = relationship("ApprovalChainCondition", back_populates="rules")
 
 
 class ApprovalNodeRecord(Base):

@@ -1,6 +1,9 @@
 from datetime import datetime
-from pydantic import BaseModel, Field, EmailStr
-from app.models import AssetStatus, AssetCategory, ApprovalType, ApprovalStatus, NotificationType, ApprovalMode
+from pydantic import BaseModel, Field, EmailStr, field_validator
+from app.models import (
+    AssetStatus, AssetCategory, ApprovalType, ApprovalStatus, NotificationType, ApprovalMode,
+    ConditionOperator, ConditionField, ConditionLogic,
+)
 
 
 class AssetCreate(BaseModel):
@@ -226,16 +229,56 @@ class ChainNodeApproverResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ConditionRuleCreate(BaseModel):
+    field: ConditionField
+    operator: ConditionOperator
+    value: list | dict | float | str | int | None = None
+
+
+class ConditionRuleResponse(BaseModel):
+    id: int
+    condition_id: int
+    field: ConditionField
+    operator: ConditionOperator
+    value: list | dict | float | str | int | None = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ConditionCreate(BaseModel):
+    target_level: int = Field(..., ge=1)
+    logic: ConditionLogic = ConditionLogic.AND
+    priority: int = 0
+    rules: list[ConditionRuleCreate] = []
+
+
+class ConditionResponse(BaseModel):
+    id: int
+    chain_node_id: int
+    target_level: int
+    logic: ConditionLogic
+    priority: int
+    rules: list[ConditionRuleResponse] = []
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
 class ChainNodeCreate(BaseModel):
     mode: ApprovalMode = ApprovalMode.SINGLE
     timeout_minutes: int | None = None
+    default_next_level: int | None = Field(None, ge=1)
     approvers: list[ChainNodeApproverCreate]
+    conditions: list[ConditionCreate] = []
 
 
 class ChainNodeUpdate(BaseModel):
     mode: ApprovalMode | None = None
     timeout_minutes: int | None = None
+    default_next_level: int | None = Field(None, ge=1)
     approvers: list[ChainNodeApproverCreate] | None = None
+    conditions: list[ConditionCreate] | None = None
 
 
 class ChainNodeResponse(BaseModel):
@@ -244,7 +287,9 @@ class ChainNodeResponse(BaseModel):
     level: int
     mode: ApprovalMode
     timeout_minutes: int | None = None
+    default_next_level: int | None = None
     approvers: list[ChainNodeApproverResponse] = []
+    conditions: list[ConditionResponse] = []
     created_at: datetime
 
     model_config = {"from_attributes": True}
