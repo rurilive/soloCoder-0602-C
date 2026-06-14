@@ -1,9 +1,6 @@
 from contextlib import asynccontextmanager
-import json
-from fastapi import FastAPI, Request, status
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from jose import JWTError, jwt
 from sqlalchemy.orm import Session
 from app.database import engine, Base, SessionLocal
 from app.routers import assets as assets_router
@@ -21,7 +18,7 @@ from app.models import (
     DEFAULT_ROLES,
     SUPER_ADMIN_USER,
 )
-from app.auth import get_password_hash, SECRET_KEY, ALGORITHM
+from app.auth import get_password_hash
 
 MUST_CHANGE_PASSWORD_WHITELIST = {
     "/api/health",
@@ -32,33 +29,9 @@ MUST_CHANGE_PASSWORD_WHITELIST = {
 
 
 async def must_change_password_middleware(request: Request, call_next):
-    path = request.url.path
-    if path in MUST_CHANGE_PASSWORD_WHITELIST:
-        return await call_next(request)
-
-    auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
-    if auth_header and auth_header.startswith("Bearer "):
-        token = auth_header[7:]
-        try:
-            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-            user_id_str = payload.get("sub")
-            if user_id_str:
-                user_id = int(user_id_str)
-                db: Session = SessionLocal()
-                try:
-                    user = db.query(User).filter(User.id == user_id).first()
-                    if user and user.is_active and user.must_change_password:
-                        return JSONResponse(
-                            status_code=status.HTTP_403_FORBIDDEN,
-                            content={
-                                "detail": "首次登录必须修改密码，请先调用 /api/auth/change-password 接口修改密码"
-                            },
-                        )
-                finally:
-                    db.close()
-        except (JWTError, ValueError):
-            pass
-
+    request.state.is_chpwd_whitelist = (
+        request.url.path in MUST_CHANGE_PASSWORD_WHITELIST
+    )
     return await call_next(request)
 
 
