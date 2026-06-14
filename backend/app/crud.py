@@ -678,27 +678,7 @@ def _check_circular_proxy(db: Session, principal_user_id: int, proxy_user_id: in
     return False
 
 
-def _set_next_level_timeout(db: Session, approval: Approval):
-    next_record = (
-        db.query(ApprovalNodeRecord)
-        .filter(
-            ApprovalNodeRecord.approval_id == approval.id,
-            ApprovalNodeRecord.level == approval.current_level,
-        )
-        .first()
-    )
-    if next_record and next_record.timeout_at is None:
-        chain_node = (
-            db.query(ApprovalChainNode)
-            .filter(ApprovalChainNode.id == next_record.chain_node_id)
-            .first()
-        )
-        if chain_node and chain_node.timeout_minutes is not None:
-            next_record.timeout_at = datetime.now() + timedelta(minutes=chain_node.timeout_minutes)
-
-
-def _enforce_next_level_timeout(db: Session, approval: Approval, context: str) -> None:
-    _set_next_level_timeout(db, approval)
+def _set_next_level_timeout(db: Session, approval: Approval, context: str = "unknown") -> None:
     next_record = (
         db.query(ApprovalNodeRecord)
         .filter(
@@ -713,19 +693,22 @@ def _enforce_next_level_timeout(db: Session, approval: Approval, context: str) -
             context, approval.id, approval.current_level,
         )
         return
-    if next_record.timeout_at is None:
-        chain_node = (
-            db.query(ApprovalChainNode)
-            .filter(ApprovalChainNode.id == next_record.chain_node_id)
-            .first()
+    chain_node = (
+        db.query(ApprovalChainNode)
+        .filter(ApprovalChainNode.id == next_record.chain_node_id)
+        .first()
+    )
+    if not chain_node or chain_node.timeout_minutes is None:
+        return
+    new_timeout = datetime.now() + timedelta(minutes=chain_node.timeout_minutes)
+    if next_record.timeout_at is not None:
+        logger.warning(
+            "[%s] 审批单#%d 节点(level=%d, role=%s) timeout_at 已存在，"
+            "重新以当前时间计算覆盖: 原值=%s, 新值=%s",
+            context, approval.id, next_record.level,
+            next_record.approver_role, next_record.timeout_at, new_timeout,
         )
-        if chain_node and chain_node.timeout_minutes is not None:
-            logger.warning(
-                "[%s] 审批单#%d 节点(level=%d, role=%s) timeout_at 仍为None，强制补设超时时间 %d 分钟",
-                context, approval.id, next_record.level,
-                next_record.approver_role, chain_node.timeout_minutes,
-            )
-            next_record.timeout_at = datetime.now() + timedelta(minutes=chain_node.timeout_minutes)
+    next_record.timeout_at = new_timeout
 
 
 def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approver: User | None = None) -> Approval:
@@ -806,7 +789,7 @@ def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approv
 
         if next_level <= approval.total_levels:
             approval.current_level = next_level
-            _enforce_next_level_timeout(db, approval, "approve_approval")
+            _set_next_level_timeout(db, approval, "approve_approval")
 
             level_desc = f"第{approval.current_level - 1}/{approval.total_levels}级审批通过"
             proxy_info = f"（代理审批，代理人: {approver_name}，代原审批人: {current_record.proxy_source}）" if current_record.proxy_source else ""
@@ -1362,7 +1345,7 @@ def check_and_process_timeouts(db: Session) -> list[dict]:
 
         if not should_reject and record.level < approval.total_levels:
             approval.current_level = record.level + 1
-            _enforce_next_level_timeout(db, approval, "check_and_process_timeouts")
+            _set_next_level_timeout(db, approval, "check_and_process_timeouts")
 
             log = AssetLog(
                 asset_id=asset.id,
