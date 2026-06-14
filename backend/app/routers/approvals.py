@@ -1,7 +1,7 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.auth import get_current_user, require_permissions
+from app.auth import get_current_user, require_permissions, log_operation
 from app.models import ApprovalStatus, ApprovalType, User
 from app.schemas import (
     ApprovalCreate,
@@ -103,12 +103,25 @@ def delete_approval_chain(
 
 @router.post("/asset/{asset_id}", response_model=ApprovalResponse)
 def create_approval(
+    request: Request,
     asset_id: int,
     data: ApprovalCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permissions("approval:submit")),
 ):
-    return crud.create_approval(db, asset_id, data, current_user)
+    approval = crud.create_approval(db, asset_id, data, current_user)
+    log_operation(
+        db,
+        module="approval",
+        action="submit",
+        user=current_user,
+        target_type="approval",
+        target_id=approval.id,
+        detail=f"提交审批单, 类型: {data.approval_type.value}",
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    return approval
 
 
 @router.get("", response_model=ApprovalListResponse)
@@ -121,10 +134,10 @@ def list_approvals(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permissions("approval:view")),
 ):
-    items, total = crud.get_approvals(db, status, approval_type, keyword, page, page_size)
+    items, total = crud.get_approvals(db, status, approval_type, keyword, page, page_size, current_user)
     result = []
     for approval in items:
-        asset = crud.get_asset(db, approval.asset_id)
+        asset = crud.get_asset(db, approval.asset_id, current_user)
         node_records = crud.get_approval_node_records(db, approval.id)
         approval_data = ApprovalDetailResponse.model_validate(approval)
         approval_data.asset_name = asset.name
@@ -150,7 +163,7 @@ def list_my_pending_approvals(
     )
     result = []
     for approval in items:
-        asset = crud.get_asset(db, approval.asset_id)
+        asset = crud.get_asset(db, approval.asset_id, current_user)
         node_records = crud.get_approval_node_records(db, approval.id)
         approval_data = ApprovalDetailResponse.model_validate(approval)
         approval_data.asset_name = asset.name
@@ -176,7 +189,7 @@ def list_my_submitted_approvals(
     )
     result = []
     for approval in items:
-        asset = crud.get_asset(db, approval.asset_id)
+        asset = crud.get_asset(db, approval.asset_id, current_user)
         node_records = crud.get_approval_node_records(db, approval.id)
         approval_data = ApprovalDetailResponse.model_validate(approval)
         approval_data.asset_name = asset.name
@@ -193,8 +206,8 @@ def get_approval(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permissions("approval:view")),
 ):
-    approval = crud.get_approval(db, approval_id)
-    asset = crud.get_asset(db, approval.asset_id)
+    approval = crud.get_approval(db, approval_id, current_user)
+    asset = crud.get_asset(db, approval.asset_id, current_user)
     node_records = crud.get_approval_node_records(db, approval.id)
     result = ApprovalDetailResponse.model_validate(approval)
     result.asset_name = asset.name
@@ -206,19 +219,47 @@ def get_approval(
 
 @router.post("/{approval_id}/approve", response_model=ApprovalResponse)
 def approve_approval(
+    request: Request,
     approval_id: int,
     data: ApprovalAction,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permissions("approval:approve")),
 ):
-    return crud.approve_approval(db, approval_id, data, current_user)
+    crud.get_approval(db, approval_id, current_user)
+    approval = crud.approve_approval(db, approval_id, data, current_user)
+    log_operation(
+        db,
+        module="approval",
+        action="approve",
+        user=current_user,
+        target_type="approval",
+        target_id=approval_id,
+        detail=f"审批通过, 意见: {data.opinion or '无'}",
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    return approval
 
 
 @router.post("/{approval_id}/reject", response_model=ApprovalResponse)
 def reject_approval(
+    request: Request,
     approval_id: int,
     data: ApprovalAction,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permissions("approval:reject")),
 ):
-    return crud.reject_approval(db, approval_id, data, current_user)
+    crud.get_approval(db, approval_id, current_user)
+    approval = crud.reject_approval(db, approval_id, data, current_user)
+    log_operation(
+        db,
+        module="approval",
+        action="reject",
+        user=current_user,
+        target_type="approval",
+        target_id=approval_id,
+        detail=f"审批驳回, 意见: {data.opinion or '无'}",
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    return approval

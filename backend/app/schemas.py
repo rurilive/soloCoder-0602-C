@@ -101,6 +101,28 @@ class ImportLogResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class OperationLogResponse(BaseModel):
+    id: int
+    module: str
+    action: str
+    operator: str
+    operator_id: int | None
+    target_type: str | None
+    target_id: int | None
+    detail: str | None
+    ip_address: str | None
+    status: str
+    error_message: str | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class OperationLogListResponse(BaseModel):
+    total: int
+    items: list[OperationLogResponse]
+
+
 class ApprovalCreate(BaseModel):
     approval_type: ApprovalType
     applicant: str = Field(..., max_length=128)

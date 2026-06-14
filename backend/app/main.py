@@ -8,6 +8,7 @@ from app.routers import approvals as approvals_router
 from app.routers import auth as auth_router
 from app.routers import users as users_router
 from app.routers import permissions as permissions_router
+from app.routers import logs as logs_router
 from app.models import (
     Permission,
     Role,
@@ -109,6 +110,7 @@ app.include_router(users_router.router)
 app.include_router(permissions_router.router)
 app.include_router(assets_router.router)
 app.include_router(approvals_router.router)
+app.include_router(logs_router.router)
 
 
 @app.get("/api/health")

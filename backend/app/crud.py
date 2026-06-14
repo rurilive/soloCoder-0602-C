@@ -111,7 +111,10 @@ def get_assets(
     keyword: str | None = None,
     page: int = 1,
     page_size: int = 20,
+    current_user: User | None = None,
 ) -> tuple[list[Asset], int]:
+    from app.auth import apply_asset_data_scope
+
     query = db.query(Asset)
     if status:
         query = query.filter(Asset.status == status)
@@ -126,6 +129,10 @@ def get_assets(
             | (Asset.serial_number.like(like))
             | (Asset.assignee.like(like))
         )
+
+    if current_user:
+        query = apply_asset_data_scope(query, db, current_user.id)
+
     total = query.count()
     items = (
         query.order_by(Asset.id.desc())
@@ -136,17 +143,43 @@ def get_assets(
     return items, total
 
 
-def get_asset(db: Session, asset_id: int) -> Asset:
+def get_asset(db: Session, asset_id: int, current_user: User | None = None) -> Asset:
+    from app.auth import is_admin_user, get_user_display_name, is_dept_manager, get_dept_user_names
+
     asset = db.query(Asset).filter(Asset.id == asset_id).first()
     if not asset:
         raise HTTPException(status_code=404, detail="资产不存在")
+
+    if current_user and not is_admin_user(db, current_user.id):
+        user_name = get_user_display_name(current_user)
+        if is_dept_manager(db, current_user.id):
+            dept_users = get_dept_user_names(db, current_user.department)
+            if asset.assignee not in dept_users:
+                raise HTTPException(status_code=403, detail="无权查看此资产")
+        else:
+            if asset.assignee != user_name:
+                raise HTTPException(status_code=403, detail="无权查看此资产")
+
     return asset
 
 
-def get_asset_by_tag(db: Session, asset_tag: str) -> Asset:
+def get_asset_by_tag(db: Session, asset_tag: str, current_user: User | None = None) -> Asset:
+    from app.auth import is_admin_user, get_user_display_name, is_dept_manager, get_dept_user_names
+
     asset = db.query(Asset).filter(Asset.asset_tag == asset_tag).first()
     if not asset:
         raise HTTPException(status_code=404, detail="资产不存在")
+
+    if current_user and not is_admin_user(db, current_user.id):
+        user_name = get_user_display_name(current_user)
+        if is_dept_manager(db, current_user.id):
+            dept_users = get_dept_user_names(db, current_user.department)
+            if asset.assignee not in dept_users:
+                raise HTTPException(status_code=403, detail="无权查看此资产")
+        else:
+            if asset.assignee != user_name:
+                raise HTTPException(status_code=403, detail="无权查看此资产")
+
     return asset
 
 
@@ -509,7 +542,10 @@ def get_approvals(
     keyword: str | None = None,
     page: int = 1,
     page_size: int = 20,
+    current_user: User | None = None,
 ) -> tuple[list[Approval], int]:
+    from app.auth import apply_approval_data_scope
+
     query = db.query(Approval)
     if status:
         query = query.filter(Approval.status == status)
@@ -527,6 +563,10 @@ def get_approvals(
             query = query.filter(Approval.asset_id.in_(asset_id_list))
         else:
             return [], 0
+
+    if current_user:
+        query = apply_approval_data_scope(query, db, current_user.id)
+
     total = query.count()
     items = (
         query.order_by(Approval.id.desc())
@@ -537,10 +577,42 @@ def get_approvals(
     return items, total
 
 
-def get_approval(db: Session, approval_id: int) -> Approval:
+def get_approval(db: Session, approval_id: int, current_user: User | None = None) -> Approval:
+    from app.auth import is_admin_user, get_user_display_name, is_dept_manager, get_dept_user_names
+    from app.models import ApprovalNodeRecord, ApprovalStatus
+
     approval = db.query(Approval).filter(Approval.id == approval_id).first()
     if not approval:
         raise HTTPException(status_code=404, detail="审批单不存在")
+
+    if current_user and not is_admin_user(db, current_user.id):
+        user_name = get_user_display_name(current_user)
+        user_role_codes = set(_get_user_role_codes(db, current_user.id))
+
+        is_applicant = approval.applicant == user_name
+
+        is_pending_approver = False
+        if approval.status == ApprovalStatus.PENDING:
+            current_node = (
+                db.query(ApprovalNodeRecord)
+                .filter(
+                    ApprovalNodeRecord.approval_id == approval_id,
+                    ApprovalNodeRecord.level == approval.current_level,
+                )
+                .first()
+            )
+            if current_node and current_node.approver_role in user_role_codes:
+                is_pending_approver = True
+
+        in_dept = False
+        if is_dept_manager(db, current_user.id):
+            dept_users = get_dept_user_names(db, current_user.department)
+            if approval.applicant in dept_users:
+                in_dept = True
+
+        if not is_applicant and not is_pending_approver and not in_dept:
+            raise HTTPException(status_code=403, detail="无权查看此审批单")
+
     return approval
 
 
@@ -929,3 +1001,98 @@ def reorder_chain_nodes(db: Session, chain_id: int, data: ChainNodesReorder) -> 
     db.commit()
     db.refresh(chain)
     return chain
+
+
+def create_operation_log(
+    db: Session,
+    module: str,
+    action: str,
+    operator: str,
+    operator_id: int | None = None,
+    target_type: str | None = None,
+    target_id: int | None = None,
+    detail: str | None = None,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
+    status: str = "success",
+    error_message: str | None = None,
+) -> OperationLog:
+    from app.models import OperationLog
+
+    log = OperationLog(
+        module=module,
+        action=action,
+        operator=operator,
+        operator_id=operator_id,
+        target_type=target_type,
+        target_id=target_id,
+        detail=detail,
+        ip_address=ip_address,
+        user_agent=user_agent,
+        status=status,
+        error_message=error_message,
+    )
+    db.add(log)
+    db.commit()
+    db.refresh(log)
+    return log
+
+
+def get_operation_logs(
+    db: Session,
+    module: str | None = None,
+    action: str | None = None,
+    operator: str | None = None,
+    target_type: str | None = None,
+    status: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    keyword: str | None = None,
+    page: int = 1,
+    page_size: int = 20,
+) -> tuple[list[OperationLog], int]:
+    from app.models import OperationLog
+    from datetime import datetime
+
+    query = db.query(OperationLog)
+
+    if module:
+        query = query.filter(OperationLog.module == module)
+    if action:
+        query = query.filter(OperationLog.action == action)
+    if operator:
+        query = query.filter(OperationLog.operator.like(f"%{operator}%"))
+    if target_type:
+        query = query.filter(OperationLog.target_type == target_type)
+    if status:
+        query = query.filter(OperationLog.status == status)
+    if start_date:
+        try:
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+            query = query.filter(OperationLog.created_at >= start_dt)
+        except ValueError:
+            pass
+    if end_date:
+        try:
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+            from datetime import timedelta
+            end_dt = end_dt + timedelta(days=1)
+            query = query.filter(OperationLog.created_at < end_dt)
+        except ValueError:
+            pass
+    if keyword:
+        like = f"%{keyword}%"
+        query = query.filter(
+            (OperationLog.detail.like(like))
+            | (OperationLog.operator.like(like))
+            | (OperationLog.action.like(like))
+        )
+
+    total = query.count()
+    items = (
+        query.order_by(OperationLog.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+    return items, total

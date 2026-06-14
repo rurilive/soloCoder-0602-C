@@ -236,3 +236,138 @@ def build_user_response(db: Session, user: User):
     response.roles = [RoleBrief.model_validate(r) for r in roles]
     response.permissions = permissions
     return response
+
+
+def is_admin_user(db: Session, user_id: int) -> bool:
+    role_codes = get_user_role_codes(db, user_id)
+    return "super_admin" in role_codes or "asset_admin" in role_codes
+
+
+def is_dept_manager(db: Session, user_id: int) -> bool:
+    role_codes = get_user_role_codes(db, user_id)
+    return "dept_manager" in role_codes
+
+
+def get_user_dept(db: Session, user_id: int) -> str | None:
+    user = db.query(User).filter(User.id == user_id).first()
+    return user.department if user else None
+
+
+def get_dept_user_names(db: Session, dept_name: str | None) -> list[str]:
+    if not dept_name:
+        return []
+    users = db.query(User).filter(User.department == dept_name, User.is_active == True).all()
+    names = []
+    for u in users:
+        if u.real_name:
+            names.append(u.real_name)
+        names.append(u.username)
+    return list(set(names))
+
+
+def get_user_display_name(user: User) -> str:
+    return user.real_name or user.username
+
+
+def apply_asset_data_scope(query, db: Session, user_id: int):
+    if is_admin_user(db, user_id):
+        return query
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        return query.filter(False)
+
+    user_name = get_user_display_name(user)
+
+    if is_dept_manager(db, user_id):
+        dept_users = get_dept_user_names(db, user.department)
+        from app.models import Asset
+        query = query.filter(Asset.assignee.in_(dept_users))
+    else:
+        from app.models import Asset
+        query = query.filter(Asset.assignee == user_name)
+
+    return query
+
+
+def apply_approval_data_scope(query, db: Session, user_id: int):
+    if is_admin_user(db, user_id):
+        return query
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        return query.filter(False)
+
+    user_name = get_user_display_name(user)
+    user_role_codes = set(get_user_role_codes(db, user_id))
+
+    from app.models import Approval, ApprovalNodeRecord, ApprovalStatus
+    from sqlalchemy import or_
+
+    if is_dept_manager(db, user_id):
+        dept_users = get_dept_user_names(db, user.department)
+        query = query.filter(
+            or_(
+                Approval.applicant.in_(dept_users),
+                Approval.id.in_(
+                    db.query(ApprovalNodeRecord.approval_id)
+                    .filter(
+                        ApprovalNodeRecord.status == ApprovalStatus.PENDING,
+                        ApprovalNodeRecord.approver_role.in_(list(user_role_codes)),
+                    )
+                    .distinct()
+                    .subquery()
+                ),
+            )
+        )
+    else:
+        query = query.filter(
+            or_(
+                Approval.applicant == user_name,
+                Approval.id.in_(
+                    db.query(ApprovalNodeRecord.approval_id)
+                    .filter(
+                        ApprovalNodeRecord.status == ApprovalStatus.PENDING,
+                        ApprovalNodeRecord.approver_role.in_(list(user_role_codes)),
+                    )
+                    .distinct()
+                    .subquery()
+                ),
+            )
+        )
+
+    return query
+
+
+def log_operation(
+    db: Session,
+    module: str,
+    action: str,
+    user: User | None = None,
+    target_type: str | None = None,
+    target_id: int | None = None,
+    detail: str | None = None,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
+    status: str = "success",
+    error_message: str | None = None,
+):
+    from app.crud import create_operation_log
+
+    operator = user.real_name or user.username if user else "system"
+    operator_id = user.id if user else None
+
+    return create_operation_log(
+        db=db,
+        module=module,
+        action=action,
+        operator=operator,
+        operator_id=operator_id,
+        target_type=target_type,
+        target_id=target_id,
+        detail=detail,
+        ip_address=ip_address,
+        user_agent=user_agent,
+        status=status,
+        error_message=error_message,
+    )
