@@ -7,8 +7,8 @@ from sqlalchemy.orm import Session
 from fastapi import HTTPException
 from app.models import (
     Asset, AssetLog, AssetStatus, AssetCategory, ImportLog,
-    Approval, ApprovalType, ApprovalStatus,
-    ApprovalChain, ApprovalChainNode, ApprovalNodeRecord,
+    Approval, ApprovalType, ApprovalStatus, ApprovalMode,
+    ApprovalChain, ApprovalChainNode, ApprovalChainNodeApprover, ApprovalNodeRecord,
     ApprovalProxy, ApprovalReminder, OperationLog,
     User, Role, UserRole,
     Notification, NotificationType,
@@ -546,27 +546,33 @@ def create_approval(db: Session, asset_id: int, data: ApprovalCreate, applicant:
     db.flush()
 
     if chain and chain_id:
+        from sqlalchemy.orm import joinedload
         nodes = (
             db.query(ApprovalChainNode)
+            .options(joinedload(ApprovalChainNode.approvers))
             .filter(ApprovalChainNode.chain_id == chain.id)
             .order_by(ApprovalChainNode.level.asc())
             .all()
         )
         now = datetime.now()
         for idx, node in enumerate(nodes):
+            if not node.approvers:
+                raise HTTPException(status_code=500, detail=f"审批链节点（level={idx + 1}）缺少审批人配置")
             timeout_at = None
             if idx == 0 and node.timeout_minutes is not None:
                 timeout_at = now + timedelta(minutes=node.timeout_minutes)
-            record = ApprovalNodeRecord(
-                approval_id=approval.id,
-                chain_node_id=node.id,
-                level=idx + 1,
-                approver_role=node.approver_role,
-                approver_name=node.approver_name,
-                status=ApprovalStatus.PENDING,
-                timeout_at=timeout_at,
-            )
-            db.add(record)
+            for approver in node.approvers:
+                record = ApprovalNodeRecord(
+                    approval_id=approval.id,
+                    chain_node_id=node.id,
+                    chain_node_approver_id=approver.id,
+                    level=idx + 1,
+                    approver_role=approver.approver_role,
+                    approver_name=approver.approver_name,
+                    status=ApprovalStatus.PENDING,
+                    timeout_at=timeout_at,
+                )
+                db.add(record)
 
     action_type = "领用申请" if data.approval_type == ApprovalType.ALLOCATE else "报废申请"
     chain_info = f"（{total_levels}级审批链）" if total_levels > 1 else ""
@@ -679,37 +685,69 @@ def _check_circular_proxy(db: Session, principal_user_id: int, proxy_user_id: in
     return False
 
 
+def _get_node_mode(db: Session, chain_node_id: int) -> ApprovalMode:
+    chain_node = db.query(ApprovalChainNode).filter(ApprovalChainNode.id == chain_node_id).first()
+    if not chain_node:
+        return ApprovalMode.SINGLE
+    return chain_node.mode
+
+
 def _set_next_level_timeout(db: Session, approval: Approval, context: str = "unknown") -> None:
-    next_record = (
+    next_records = (
         db.query(ApprovalNodeRecord)
         .filter(
             ApprovalNodeRecord.approval_id == approval.id,
             ApprovalNodeRecord.level == approval.current_level,
+            ApprovalNodeRecord.status == ApprovalStatus.PENDING,
         )
-        .first()
+        .all()
     )
-    if not next_record:
+    if not next_records:
         logger.warning(
-            "[%s] 审批单#%d 下一级节点(level=%d)不存在，无法设置超时",
+            "[%s] 审批单#%d 下一级节点(level=%d)不存在待处理记录，无法设置超时",
             context, approval.id, approval.current_level,
         )
         return
     chain_node = (
         db.query(ApprovalChainNode)
-        .filter(ApprovalChainNode.id == next_record.chain_node_id)
+        .filter(ApprovalChainNode.id == next_records[0].chain_node_id)
         .first()
     )
     if not chain_node or chain_node.timeout_minutes is None:
         return
     new_timeout = datetime.now() + timedelta(minutes=chain_node.timeout_minutes)
-    if next_record.timeout_at is not None:
-        logger.warning(
-            "[%s] 审批单#%d 节点(level=%d, role=%s) timeout_at 已存在，"
-            "重新以当前时间计算覆盖: 原值=%s, 新值=%s",
-            context, approval.id, next_record.level,
-            next_record.approver_role, next_record.timeout_at, new_timeout,
+    for record in next_records:
+        if record.timeout_at is not None:
+            logger.warning(
+                "[%s] 审批单#%d 节点(level=%d, approver=%s) timeout_at 已存在，"
+                "重新以当前时间计算覆盖: 原值=%s, 新值=%s",
+                context, approval.id, record.level,
+                record.approver_name, record.timeout_at, new_timeout,
+            )
+        record.timeout_at = new_timeout
+
+
+def _check_proxy_conflict_for_countersign(
+    db: Session,
+    approver: User,
+    approval_id: int,
+    level: int,
+) -> None:
+    approver_name = approver.real_name or approver.username
+    same_level_records = (
+        db.query(ApprovalNodeRecord)
+        .filter(
+            ApprovalNodeRecord.approval_id == approval_id,
+            ApprovalNodeRecord.level == level,
         )
-    next_record.timeout_at = new_timeout
+        .all()
+    )
+    for record in same_level_records:
+        if record.approver_name == approver_name or record.approver_role in _get_user_role_codes(db, approver.id):
+            raise HTTPException(
+                status_code=400,
+                detail="代理审批冲突：您作为直接审批人出现在同一级会签节点中，不能代理审批该节点",
+            )
 
 
 def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approver: User | None = None) -> Approval:
@@ -726,25 +764,39 @@ def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approv
 
     now = datetime.now()
 
-    current_record = (
+    current_level_records = (
         db.query(ApprovalNodeRecord)
         .filter(
             ApprovalNodeRecord.approval_id == approval_id,
             ApprovalNodeRecord.level == approval.current_level,
         )
-        .first()
+        .all()
     )
 
-    if current_record:
-        if current_record.status != ApprovalStatus.PENDING:
-            raise HTTPException(status_code=400, detail="当前节点已处理，不可重复操作")
+    if not current_level_records:
+        raise HTTPException(status_code=400, detail="当前审批节点不存在")
 
-        is_direct_approver = approver and _user_is_approver_for_node(db, approver.id, current_record)
+    node_mode = _get_node_mode(db, current_level_records[0].chain_node_id)
 
-        is_proxy_approver = False
-        proxy_principal_name = None
+    pending_record = None
+    is_direct_approver = False
+    is_proxy_approver = False
+    proxy_principal_name = None
 
-        if approver and not is_direct_approver:
+    for record in current_level_records:
+        if record.status != ApprovalStatus.PENDING:
+            continue
+
+        if approver and _user_is_approver_for_node(db, approver.id, record):
+            pending_record = record
+            is_direct_approver = True
+            break
+
+    if not pending_record and approver:
+        for record in current_level_records:
+            if record.status != ApprovalStatus.PENDING:
+                continue
+
             active_proxies = (
                 db.query(ApprovalProxy)
                 .filter(
@@ -759,52 +811,90 @@ def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approv
                 principal = db.query(User).filter(User.id == ap.principal_user_id).first()
                 if principal:
                     principal_role_codes = _get_user_role_codes(db, principal.id)
-                    if current_record.approver_role in principal_role_codes:
+                    if record.approver_role in principal_role_codes:
                         if _check_circular_proxy(db, principal.id, approver.id, approval.applicant):
                             raise HTTPException(status_code=400, detail="循环代理检测：代理人同时也是申请人，无法代理审批")
+
+                        if node_mode in (ApprovalMode.ALL_SIGN, ApprovalMode.OR_SIGN):
+                            _check_proxy_conflict_for_countersign(db, approver, approval_id, approval.current_level)
+
+                        pending_record = record
                         is_proxy_approver = True
                         proxy_principal_name = principal.real_name or principal.username
                         break
+            if pending_record:
+                break
 
-        if approver and not is_direct_approver and not is_proxy_approver:
-            raise HTTPException(
-                status_code=403,
-                detail=f"您没有权限审批此节点，当前节点需要角色: {current_record.approver_role}",
-            )
+    if not pending_record:
+        raise HTTPException(status_code=400, detail="当前没有您需要审批的待处理节点，或节点已处理")
 
-        current_record.status = ApprovalStatus.APPROVED
-        current_record.opinion = data.opinion
-        current_record.acted_at = now
-
-        if is_proxy_approver and approver:
-            current_record.actual_approver = approver_name
-            current_record.proxy_source = proxy_principal_name
-
-        all_records = (
-            db.query(ApprovalNodeRecord)
-            .filter(ApprovalNodeRecord.approval_id == approval_id)
-            .order_by(ApprovalNodeRecord.level.asc())
-            .all()
+    if approver and not is_direct_approver and not is_proxy_approver:
+        raise HTTPException(
+            status_code=403,
+            detail=f"您没有权限审批此节点",
         )
-        next_level = approval.current_level + 1
 
-        if next_level <= approval.total_levels:
-            approval.current_level = next_level
-            _set_next_level_timeout(db, approval, "approve_approval")
+    pending_record.status = ApprovalStatus.APPROVED
+    pending_record.opinion = data.opinion
+    pending_record.acted_at = now
 
-            level_desc = f"第{approval.current_level - 1}/{approval.total_levels}级审批通过"
-            proxy_info = f"（代理审批，代理人: {approver_name}，代原审批人: {current_record.proxy_source}）" if current_record.proxy_source else ""
-            log = AssetLog(
-                asset_id=asset.id,
-                action="多级审批通过",
-                operator=approver_name,
-                operator_id=approver_id,
-                detail=f"{level_desc}，审批人: {current_record.approver_name}{proxy_info}。{data.opinion or ''}",
-            )
-            db.add(log)
-            db.commit()
-            db.refresh(approval)
-            return approval
+    if is_proxy_approver and approver:
+        pending_record.actual_approver = approver_name
+        pending_record.proxy_source = proxy_principal_name
+
+    level_complete = False
+    if node_mode == ApprovalMode.SINGLE:
+        level_complete = True
+    elif node_mode == ApprovalMode.ALL_SIGN:
+        all_approved = all(
+            r.status == ApprovalStatus.APPROVED for r in current_level_records
+        )
+        level_complete = all_approved
+    elif node_mode == ApprovalMode.OR_SIGN:
+        any_approved = any(
+            r.status == ApprovalStatus.APPROVED for r in current_level_records
+        )
+        if any_approved:
+            for r in current_level_records:
+                if r.status == ApprovalStatus.PENDING:
+                    r.status = ApprovalStatus.APPROVED
+                    r.opinion = "或签模式，其他审批人已通过"
+                    r.acted_at = now
+                    if is_proxy_approver:
+                        r.actual_approver = approver_name
+                        r.proxy_source = proxy_principal_name
+            level_complete = True
+
+    next_level = approval.current_level + 1
+
+    if level_complete and next_level <= approval.total_levels:
+        approval.current_level = next_level
+        _set_next_level_timeout(db, approval, "approve_approval")
+
+        mode_desc = {
+            ApprovalMode.SINGLE: "单人审批",
+            ApprovalMode.ALL_SIGN: "会签",
+            ApprovalMode.OR_SIGN: "或签",
+        }.get(node_mode, "审批")
+
+        level_desc = f"第{approval.current_level - 1}/{approval.total_levels}级{mode_desc}通过"
+        proxy_info = f"（代理审批，代理人: {approver_name}，代原审批人: {pending_record.proxy_source}）" if pending_record.proxy_source else ""
+        log = AssetLog(
+            asset_id=asset.id,
+            action="多级审批通过",
+            operator=approver_name,
+            operator_id=approver_id,
+            detail=f"{level_desc}，审批人: {pending_record.approver_name}{proxy_info}。{data.opinion or ''}",
+        )
+        db.add(log)
+        db.commit()
+        db.refresh(approval)
+        return approval
+
+    if not level_complete:
+        db.commit()
+        db.refresh(approval)
+        return approval
 
     approval.status = ApprovalStatus.APPROVED
     approval.approver = approver_name
@@ -849,23 +939,39 @@ def reject_approval(db: Session, approval_id: int, data: ApprovalAction, approve
 
     now = datetime.now()
 
-    current_record = (
+    current_level_records = (
         db.query(ApprovalNodeRecord)
         .filter(
             ApprovalNodeRecord.approval_id == approval_id,
             ApprovalNodeRecord.level == approval.current_level,
         )
-        .first()
+        .all()
     )
 
-    if current_record:
-        if current_record.status != ApprovalStatus.PENDING:
-            raise HTTPException(status_code=400, detail="当前节点已处理，不可重复操作")
+    if not current_level_records:
+        raise HTTPException(status_code=400, detail="当前审批节点不存在")
 
-        is_direct_approver = approver and _user_is_approver_for_node(db, approver.id, current_record)
+    node_mode = _get_node_mode(db, current_level_records[0].chain_node_id)
 
-        is_proxy_approver = False
-        if approver and not is_direct_approver:
+    pending_record = None
+    is_direct_approver = False
+    is_proxy_approver = False
+    proxy_principal_name = None
+
+    for record in current_level_records:
+        if record.status != ApprovalStatus.PENDING:
+            continue
+
+        if approver and _user_is_approver_for_node(db, approver.id, record):
+            pending_record = record
+            is_direct_approver = True
+            break
+
+    if not pending_record and approver:
+        for record in current_level_records:
+            if record.status != ApprovalStatus.PENDING:
+                continue
+
             active_proxies = (
                 db.query(ApprovalProxy)
                 .filter(
@@ -880,34 +986,53 @@ def reject_approval(db: Session, approval_id: int, data: ApprovalAction, approve
                 principal = db.query(User).filter(User.id == ap.principal_user_id).first()
                 if principal:
                     principal_role_codes = _get_user_role_codes(db, principal.id)
-                    if current_record.approver_role in principal_role_codes:
+                    if record.approver_role in principal_role_codes:
                         if _check_circular_proxy(db, principal.id, approver.id, approval.applicant):
                             raise HTTPException(status_code=400, detail="循环代理检测：代理人同时也是申请人，无法代理审批")
+
+                        if node_mode in (ApprovalMode.ALL_SIGN, ApprovalMode.OR_SIGN):
+                            _check_proxy_conflict_for_countersign(db, approver, approval_id, approval.current_level)
+
+                        pending_record = record
                         is_proxy_approver = True
-                        current_record.actual_approver = approver_name
-                        current_record.proxy_source = principal.real_name or principal.username
+                        proxy_principal_name = principal.real_name or principal.username
                         break
+            if pending_record:
+                break
 
-        if approver and not is_direct_approver and not is_proxy_approver:
-            raise HTTPException(
-                status_code=403,
-                detail=f"您没有权限审批此节点，当前节点需要角色: {current_record.approver_role}",
-            )
+    if not pending_record:
+        raise HTTPException(status_code=400, detail="当前没有您需要审批的待处理节点，或节点已处理")
 
-        current_record.status = ApprovalStatus.REJECTED
-        current_record.opinion = data.opinion
-        current_record.acted_at = now
-
-        remaining_records = (
-            db.query(ApprovalNodeRecord)
-            .filter(
-                ApprovalNodeRecord.approval_id == approval_id,
-                ApprovalNodeRecord.level > approval.current_level,
-            )
-            .all()
+    if approver and not is_direct_approver and not is_proxy_approver:
+        raise HTTPException(
+            status_code=403,
+            detail=f"您没有权限审批此节点",
         )
-        for r in remaining_records:
+
+    pending_record.status = ApprovalStatus.REJECTED
+    pending_record.opinion = data.opinion
+    pending_record.acted_at = now
+
+    if is_proxy_approver and approver:
+        pending_record.actual_approver = approver_name
+        pending_record.proxy_source = proxy_principal_name
+
+    for r in current_level_records:
+        if r.status == ApprovalStatus.PENDING:
             r.status = ApprovalStatus.REJECTED
+            r.opinion = f"会签节点被驳回：{data.opinion or '无意见'}"
+            r.acted_at = now
+
+    remaining_records = (
+        db.query(ApprovalNodeRecord)
+        .filter(
+            ApprovalNodeRecord.approval_id == approval_id,
+            ApprovalNodeRecord.level > approval.current_level,
+        )
+        .all()
+    )
+    for r in remaining_records:
+        r.status = ApprovalStatus.REJECTED
 
     approval.status = ApprovalStatus.REJECTED
     approval.approver = approver_name
@@ -916,10 +1041,15 @@ def reject_approval(db: Session, approval_id: int, data: ApprovalAction, approve
     asset.status = approval.previous_status
 
     action_type = "领用" if approval.approval_type == ApprovalType.ALLOCATE else "报废"
-    level_info = f"（第{approval.current_level}/{approval.total_levels}级驳回）" if approval.total_levels > 1 else ""
+    mode_desc = {
+        ApprovalMode.SINGLE: "单人审批",
+        ApprovalMode.ALL_SIGN: "会签",
+        ApprovalMode.OR_SIGN: "或签",
+    }.get(node_mode, "审批")
+    level_info = f"（第{approval.current_level}/{approval.total_levels}级{mode_desc}驳回）" if approval.total_levels > 1 else ""
     proxy_info = ""
-    if current_record and current_record.proxy_source:
-        proxy_info = f"（代理审批，代理人: {current_record.actual_approver}，代原审批人: {current_record.proxy_source}）"
+    if pending_record.proxy_source:
+        proxy_info = f"（代理审批，代理人: {approver_name}，代原审批人: {pending_record.proxy_source}）"
     action = f"{action_type}审批驳回"
     detail = f"审批驳回{level_info}{proxy_info}。{data.opinion or ''}"
 
@@ -970,7 +1100,7 @@ def withdraw_approval(db: Session, approval_id: int, reason: str | None = None, 
             record.status = ApprovalStatus.WITHDRAWN
             record.acted_at = now
             record.opinion = "审批已撤回"
-        elif record.status in (ApprovalStatus.APPROVED, ApprovalStatus.ESCALATED):
+        elif record.status == ApprovalStatus.ESCALATED:
             record.status = ApprovalStatus.WITHDRAWN
             if not record.opinion:
                 record.opinion = "审批已撤回"
@@ -1065,17 +1195,19 @@ def remind_approval(db: Session, approval_id: int, message: str | None = None, a
 
     now = datetime.now()
 
-    current_record = (
+    current_level_records = (
         db.query(ApprovalNodeRecord)
         .filter(
             ApprovalNodeRecord.approval_id == approval_id,
             ApprovalNodeRecord.level == approval.current_level,
         )
-        .first()
+        .all()
     )
-    if not current_record:
+    if not current_level_records:
         raise HTTPException(status_code=400, detail="当前审批节点不存在")
-    if current_record.status != ApprovalStatus.PENDING:
+
+    pending_records = [r for r in current_level_records if r.status == ApprovalStatus.PENDING]
+    if not pending_records:
         raise HTTPException(status_code=400, detail="当前节点已处理，不可催办")
 
     last_reminder = (
@@ -1121,33 +1253,45 @@ def remind_approval(db: Session, approval_id: int, message: str | None = None, a
         .count()
     )
 
-    approver_users = _find_users_by_role(db, current_record.approver_role)
+    notified_roles = set()
+    for record in pending_records:
+        if record.approver_role in notified_roles:
+            continue
+        notified_roles.add(record.approver_role)
+        approver_users = _find_users_by_role(db, record.approver_role)
 
-    action_type = "领用" if approval.approval_type == ApprovalType.ALLOCATE else "报废"
-    notification_title = f"审批催办：{action_type}申请"
-    notification_content = (
-        f"申请人 {approval.applicant} 对 {action_type}审批单（#{approval.id}）发起了催办，"
-        f"请尽快处理。"
-    )
-    if message:
-        notification_content += f"\n催办留言：{message}"
-
-    for user in approver_users:
-        _create_notification(
-            db,
-            user_id=user.id,
-            notification_type=NotificationType.APPROVAL_REMINDER,
-            title=notification_title,
-            content=notification_content,
-            related_id=approval_id,
-            related_type="approval",
+        action_type = "领用" if approval.approval_type == ApprovalType.ALLOCATE else "报废"
+        notification_title = f"审批催办：{action_type}申请"
+        notification_content = (
+            f"申请人 {approval.applicant} 对 {action_type}审批单（#{approval.id}）发起了催办，"
+            f"请尽快处理。待审批人：{record.approver_name}"
         )
+        if message:
+            notification_content += f"\n催办留言：{message}"
+
+        for user in approver_users:
+            _create_notification(
+                db,
+                user_id=user.id,
+                notification_type=NotificationType.APPROVAL_REMINDER,
+                title=notification_title,
+                content=notification_content,
+                related_id=approval_id,
+                related_type="approval",
+            )
 
     if node_reminder_count >= 3:
-        _trigger_escalation_by_reminder(db, approval, current_record, node_reminder_count)
+        _trigger_escalation_by_reminder(db, approval, pending_records, node_reminder_count)
 
     applicant_display = applicant.real_name or applicant.username if applicant else "system"
     applicant_id = applicant.id if applicant else None
+
+    node_mode = _get_node_mode(db, current_level_records[0].chain_node_id)
+    mode_desc = {
+        ApprovalMode.SINGLE: "单人审批",
+        ApprovalMode.ALL_SIGN: "会签",
+        ApprovalMode.OR_SIGN: "或签",
+    }.get(node_mode, "审批")
 
     op_log = OperationLog(
         module="approval",
@@ -1156,7 +1300,7 @@ def remind_approval(db: Session, approval_id: int, message: str | None = None, a
         operator_id=applicant_id,
         target_type="approval",
         target_id=approval_id,
-        detail=f"第{node_reminder_count}次催办（当前节点），全局第{approval.reminder_count}次，节点：第{approval.current_level}级节点",
+        detail=f"第{node_reminder_count}次催办（{mode_desc}节点，共{len(current_level_records)}人，待审批{len(pending_records)}人），全局第{approval.reminder_count}次，节点：第{approval.current_level}级节点",
     )
     db.add(op_log)
 
@@ -1168,45 +1312,65 @@ def remind_approval(db: Session, approval_id: int, message: str | None = None, a
 def _trigger_escalation_by_reminder(
     db: Session,
     approval: Approval,
-    current_record: ApprovalNodeRecord,
+    pending_records: list[ApprovalNodeRecord],
     node_reminder_count: int,
 ) -> None:
     now = datetime.now()
     asset = db.query(Asset).filter(Asset.id == approval.asset_id).first()
-    if not asset:
+    if not asset or not pending_records:
         return
 
-    current_record.status = ApprovalStatus.ESCALATED
-    current_record.is_escalated = True
-    current_record.acted_at = now
-    current_record.opinion = f"催办{node_reminder_count}次未响应，自动升级"
+    current_level = pending_records[0].level
+
+    for record in pending_records:
+        if record.status == ApprovalStatus.PENDING:
+            record.status = ApprovalStatus.ESCALATED
+            record.is_escalated = True
+            record.acted_at = now
+            record.opinion = f"催办{node_reminder_count}次未响应，自动升级"
 
     should_reject = False
     reason_for_reject = ""
 
-    if current_record.level < approval.total_levels:
-        next_record = (
+    if current_level < approval.total_levels:
+        next_records = (
             db.query(ApprovalNodeRecord)
             .filter(
                 ApprovalNodeRecord.approval_id == approval.id,
-                ApprovalNodeRecord.level == current_record.level + 1,
+                ApprovalNodeRecord.level == current_level + 1,
             )
-            .first()
+            .all()
         )
-        if next_record and not _role_is_truly_higher(current_record.approver_role, next_record.approver_role):
-            should_reject = True
-            reason_for_reject = f"下一级角色（{next_record.approver_role}）权限不高于当前级（{current_record.approver_role}），避免升级死循环，自动驳回"
+        if next_records:
+            all_lower = True
+            for pending in pending_records:
+                for next_r in next_records:
+                    if _role_is_truly_higher(pending.approver_role, next_r.approver_role):
+                        all_lower = False
+                        break
+                if not all_lower:
+                    break
+            if all_lower:
+                should_reject = True
+                reason_for_reject = "下一级角色权限不高于当前级，避免升级死循环，自动驳回"
 
-    if not should_reject and current_record.level < approval.total_levels:
-        approval.current_level = current_record.level + 1
+    if not should_reject and current_level < approval.total_levels:
+        approval.current_level = current_level + 1
         _set_next_level_timeout(db, approval, "remind_escalation")
+
+        node_mode = _get_node_mode(db, pending_records[0].chain_node_id)
+        mode_desc = {
+            ApprovalMode.SINGLE: "单人审批",
+            ApprovalMode.ALL_SIGN: "会签",
+            ApprovalMode.OR_SIGN: "或签",
+        }.get(node_mode, "审批")
 
         log = AssetLog(
             asset_id=asset.id,
             action="催办超时升级",
             operator="系统",
             operator_id=None,
-            detail=f"第{current_record.level}/{approval.total_levels}级审批催办{node_reminder_count}次未响应，自动升级到第{current_record.level + 1}级",
+            detail=f"第{current_level}/{approval.total_levels}级{mode_desc}催办{node_reminder_count}次未响应，自动升级到第{current_level + 1}级（升级{len(pending_records)}人）",
         )
         db.add(log)
 
@@ -1214,7 +1378,7 @@ def _trigger_escalation_by_reminder(
             module="approval",
             action="reminder_escalate",
             operator="系统",
-            detail=f"审批单#{approval.id}第{current_record.level}级催办{node_reminder_count}次未响应，升级到第{current_record.level + 1}级",
+            detail=f"审批单#{approval.id}第{current_level}级{mode_desc}催办{node_reminder_count}次未响应，升级到第{current_level + 1}级（升级{len(pending_records)}人）",
         )
         db.add(op_log)
     else:
@@ -1232,7 +1396,7 @@ def _trigger_escalation_by_reminder(
             db.query(ApprovalNodeRecord)
             .filter(
                 ApprovalNodeRecord.approval_id == approval.id,
-                ApprovalNodeRecord.level > current_record.level,
+                ApprovalNodeRecord.level > current_level,
                 ApprovalNodeRecord.status == ApprovalStatus.PENDING,
             )
             .all()
@@ -1241,7 +1405,7 @@ def _trigger_escalation_by_reminder(
             r.status = ApprovalStatus.REJECTED
 
         log_detail = (
-            f"（第{current_record.level}/{approval.total_levels}级）{final_reason}，资产状态恢复为{approval.previous_status.value}"
+            f"（第{current_level}/{approval.total_levels}级）{final_reason}，资产状态恢复为{approval.previous_status.value}"
         )
         log = AssetLog(
             asset_id=asset.id,
@@ -1422,14 +1586,27 @@ def create_approval_chain(db: Session, data: ApprovalChainCreate) -> ApprovalCha
     db.flush()
 
     for idx, node_data in enumerate(data.nodes):
+        if not node_data.approvers:
+            raise HTTPException(status_code=400, detail=f"第{idx + 1}级节点至少需要指定一个审批人")
+        if node_data.mode == ApprovalMode.SINGLE and len(node_data.approvers) != 1:
+            raise HTTPException(status_code=400, detail=f"单人审批模式（第{idx + 1}级）只能指定一个审批人")
+
         node = ApprovalChainNode(
             chain_id=chain.id,
             level=idx + 1,
-            approver_role=node_data.approver_role,
-            approver_name=node_data.approver_name,
+            mode=node_data.mode,
             timeout_minutes=node_data.timeout_minutes,
         )
         db.add(node)
+        db.flush()
+
+        for approver_data in node_data.approvers:
+            approver = ApprovalChainNodeApprover(
+                chain_node_id=node.id,
+                approver_role=approver_data.approver_role,
+                approver_name=approver_data.approver_name,
+            )
+            db.add(approver)
 
     db.commit()
     db.refresh(chain)
@@ -1463,8 +1640,10 @@ def get_approval_chain(db: Session, chain_id: int) -> ApprovalChain:
 
 
 def get_chain_nodes(db: Session, chain_id: int) -> list[ApprovalChainNode]:
+    from sqlalchemy.orm import joinedload
     return (
         db.query(ApprovalChainNode)
+        .options(joinedload(ApprovalChainNode.approvers))
         .filter(ApprovalChainNode.chain_id == chain_id)
         .order_by(ApprovalChainNode.level.asc())
         .all()
@@ -1484,16 +1663,35 @@ def update_approval_chain(db: Session, chain_id: int, data: ApprovalChainUpdate)
         chain.is_default = data.is_default
 
     if data.nodes is not None:
+        db.query(ApprovalChainNodeApprover).filter(
+            ApprovalChainNodeApprover.chain_node_id.in_(
+                db.query(ApprovalChainNode.id).filter(ApprovalChainNode.chain_id == chain_id)
+            )
+        ).delete(synchronize_session=False)
         db.query(ApprovalChainNode).filter(ApprovalChainNode.chain_id == chain_id).delete()
+
         for idx, node_data in enumerate(data.nodes):
+            if not node_data.approvers:
+                raise HTTPException(status_code=400, detail=f"第{idx + 1}级节点至少需要指定一个审批人")
+            if node_data.mode == ApprovalMode.SINGLE and len(node_data.approvers) != 1:
+                raise HTTPException(status_code=400, detail=f"单人审批模式（第{idx + 1}级）只能指定一个审批人")
+
             node = ApprovalChainNode(
                 chain_id=chain_id,
                 level=idx + 1,
-                approver_role=node_data.approver_role,
-                approver_name=node_data.approver_name,
+                mode=node_data.mode,
                 timeout_minutes=node_data.timeout_minutes,
             )
             db.add(node)
+            db.flush()
+
+            for approver_data in node_data.approvers:
+                approver = ApprovalChainNodeApprover(
+                    chain_node_id=node.id,
+                    approver_role=approver_data.approver_role,
+                    approver_name=approver_data.approver_name,
+                )
+                db.add(approver)
 
     db.commit()
     db.refresh(chain)
@@ -1509,6 +1707,11 @@ def delete_approval_chain(db: Session, chain_id: int) -> None:
     )
     if pending_approvals > 0:
         raise HTTPException(status_code=400, detail="该审批链下有待处理的审批单，不可删除")
+    db.query(ApprovalChainNodeApprover).filter(
+        ApprovalChainNodeApprover.chain_node_id.in_(
+            db.query(ApprovalChainNode.id).filter(ApprovalChainNode.chain_id == chain_id)
+        )
+    ).delete(synchronize_session=False)
     db.query(ApprovalChainNode).filter(ApprovalChainNode.chain_id == chain_id).delete()
     db.delete(chain)
     db.commit()
@@ -1640,47 +1843,84 @@ def check_and_process_timeouts(db: Session) -> list[dict]:
         .all()
     )
 
-    processed = []
+    grouped: dict[tuple[int, int], list[ApprovalNodeRecord]] = {}
     for record in timed_out_records:
-        approval = db.query(Approval).filter(Approval.id == record.approval_id).first()
+        key = (record.approval_id, record.level)
+        if key not in grouped:
+            grouped[key] = []
+        grouped[key].append(record)
+
+    processed = []
+    processed_keys: set[tuple[int, int]] = set()
+
+    for (approval_id, level), records in grouped.items():
+        if (approval_id, level) in processed_keys:
+            continue
+
+        approval = db.query(Approval).filter(Approval.id == approval_id).first()
         if not approval or approval.status != ApprovalStatus.PENDING:
+            continue
+
+        if approval.current_level != level:
             continue
 
         asset = db.query(Asset).filter(Asset.id == approval.asset_id).first()
         if not asset:
             continue
 
-        record.status = ApprovalStatus.ESCALATED
-        record.is_escalated = True
-        record.acted_at = now
-        record.opinion = "审批超时，自动升级"
+        node_mode = _get_node_mode(db, records[0].chain_node_id)
+
+        pending_records = [r for r in records if r.status == ApprovalStatus.PENDING]
+        if not pending_records:
+            continue
+
+        for record in pending_records:
+            record.status = ApprovalStatus.ESCALATED
+            record.is_escalated = True
+            record.acted_at = now
+            record.opinion = "审批超时，自动升级"
 
         should_reject = False
         reason_for_reject = ""
 
-        if record.level < approval.total_levels:
-            next_record = (
+        if level < approval.total_levels:
+            next_records = (
                 db.query(ApprovalNodeRecord)
                 .filter(
                     ApprovalNodeRecord.approval_id == approval.id,
-                    ApprovalNodeRecord.level == record.level + 1,
+                    ApprovalNodeRecord.level == level + 1,
                 )
-                .first()
+                .all()
             )
-            if next_record and not _role_is_truly_higher(record.approver_role, next_record.approver_role):
-                should_reject = True
-                reason_for_reject = f"下一级角色（{next_record.approver_role}）权限不高于当前级（{record.approver_role}），避免升级死循环，自动驳回"
+            if next_records:
+                all_lower = True
+                for pending in pending_records:
+                    for next_r in next_records:
+                        if _role_is_truly_higher(pending.approver_role, next_r.approver_role):
+                            all_lower = False
+                            break
+                    if not all_lower:
+                        break
+                if all_lower:
+                    should_reject = True
+                    reason_for_reject = "下一级角色权限不高于当前级，避免升级死循环，自动驳回"
 
-        if not should_reject and record.level < approval.total_levels:
-            approval.current_level = record.level + 1
+        if not should_reject and level < approval.total_levels:
+            approval.current_level = level + 1
             _set_next_level_timeout(db, approval, "check_and_process_timeouts")
+
+            mode_desc = {
+                ApprovalMode.SINGLE: "单人审批",
+                ApprovalMode.ALL_SIGN: "会签",
+                ApprovalMode.OR_SIGN: "或签",
+            }.get(node_mode, "审批")
 
             log = AssetLog(
                 asset_id=asset.id,
                 action="审批超时升级",
                 operator="系统",
                 operator_id=None,
-                detail=f"第{record.level}/{approval.total_levels}级审批超时，自动升级到第{record.level + 1}级",
+                detail=f"第{level}/{approval.total_levels}级{mode_desc}超时，自动升级到第{level + 1}级（升级{len(pending_records)}人）",
             )
             db.add(log)
 
@@ -1688,15 +1928,16 @@ def check_and_process_timeouts(db: Session) -> list[dict]:
                 module="approval",
                 action="timeout_escalate",
                 operator="系统",
-                detail=f"审批单#{approval.id}第{record.level}级超时，升级到第{record.level + 1}级",
+                detail=f"审批单#{approval.id}第{level}级{mode_desc}超时，升级到第{level + 1}级（升级{len(pending_records)}人）",
             )
             db.add(op_log)
 
             processed.append({
                 "approval_id": approval.id,
-                "level": record.level,
+                "level": level,
                 "action": "escalated",
-                "new_level": record.level + 1,
+                "new_level": level + 1,
+                "escalated_count": len(pending_records),
             })
         else:
             if should_reject:
@@ -1713,7 +1954,7 @@ def check_and_process_timeouts(db: Session) -> list[dict]:
                 db.query(ApprovalNodeRecord)
                 .filter(
                     ApprovalNodeRecord.approval_id == approval.id,
-                    ApprovalNodeRecord.level > record.level,
+                    ApprovalNodeRecord.level > level,
                     ApprovalNodeRecord.status == ApprovalStatus.PENDING,
                 )
                 .all()
@@ -1722,7 +1963,7 @@ def check_and_process_timeouts(db: Session) -> list[dict]:
                 r.status = ApprovalStatus.REJECTED
 
             log_detail = (
-                f"（第{record.level}/{approval.total_levels}级）{final_reason}，资产状态恢复为{approval.previous_status.value}"
+                f"（第{level}/{approval.total_levels}级）{final_reason}，资产状态恢复为{approval.previous_status.value}"
             )
             log = AssetLog(
                 asset_id=asset.id,
@@ -1743,10 +1984,12 @@ def check_and_process_timeouts(db: Session) -> list[dict]:
 
             processed.append({
                 "approval_id": approval.id,
-                "level": record.level,
+                "level": level,
                 "action": "rejected",
                 "reason": final_reason,
             })
+
+        processed_keys.add((approval_id, level))
 
     if processed:
         db.commit()

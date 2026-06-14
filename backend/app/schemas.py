@@ -1,6 +1,6 @@
 from datetime import datetime
 from pydantic import BaseModel, Field, EmailStr
-from app.models import AssetStatus, AssetCategory, ApprovalType, ApprovalStatus, NotificationType
+from app.models import AssetStatus, AssetCategory, ApprovalType, ApprovalStatus, NotificationType, ApprovalMode
 
 
 class AssetCreate(BaseModel):
@@ -171,6 +171,7 @@ class ApprovalNodeRecordResponse(BaseModel):
     id: int
     approval_id: int
     chain_node_id: int
+    chain_node_approver_id: int | None = None
     level: int
     approver_role: str
     approver_name: str
@@ -210,25 +211,40 @@ class ApprovalListResponse(BaseModel):
     items: list[ApprovalDetailResponse]
 
 
-class ChainNodeCreate(BaseModel):
+class ChainNodeApproverCreate(BaseModel):
     approver_role: str = Field(..., max_length=64)
     approver_name: str = Field(..., max_length=128)
+
+
+class ChainNodeApproverResponse(BaseModel):
+    id: int
+    chain_node_id: int
+    approver_role: str
+    approver_name: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ChainNodeCreate(BaseModel):
+    mode: ApprovalMode = ApprovalMode.SINGLE
     timeout_minutes: int | None = None
+    approvers: list[ChainNodeApproverCreate]
 
 
 class ChainNodeUpdate(BaseModel):
-    approver_role: str | None = Field(None, max_length=64)
-    approver_name: str | None = Field(None, max_length=128)
+    mode: ApprovalMode | None = None
     timeout_minutes: int | None = None
+    approvers: list[ChainNodeApproverCreate] | None = None
 
 
 class ChainNodeResponse(BaseModel):
     id: int
     chain_id: int
     level: int
-    approver_role: str
-    approver_name: str
+    mode: ApprovalMode
     timeout_minutes: int | None = None
+    approvers: list[ChainNodeApproverResponse] = []
     created_at: datetime
 
     model_config = {"from_attributes": True}

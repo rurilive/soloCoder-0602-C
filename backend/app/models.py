@@ -26,6 +26,12 @@ class ApprovalStatus(str, enum.Enum):
     WITHDRAWN = "withdrawn"
 
 
+class ApprovalMode(str, enum.Enum):
+    SINGLE = "single"
+    ALL_SIGN = "all_sign"
+    OR_SIGN = "or_sign"
+
+
 class NotificationType(str, enum.Enum):
     APPROVAL_REMINDER = "approval_reminder"
     APPROVAL_SUBMITTED = "approval_submitted"
@@ -84,10 +90,27 @@ class ApprovalChainNode(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     chain_id: Mapped[int] = mapped_column(Integer, ForeignKey("approval_chains.id"), nullable=False, index=True)
     level: Mapped[int] = mapped_column(Integer, nullable=False)
-    approver_role: Mapped[str] = mapped_column(String(64), nullable=False)
-    approver_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    mode: Mapped[ApprovalMode] = mapped_column(Enum(ApprovalMode), default=ApprovalMode.SINGLE, nullable=False)
     timeout_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
+
+    approvers: Mapped[list["ApprovalChainNodeApprover"]] = relationship(
+        "ApprovalChainNodeApprover",
+        back_populates="chain_node",
+        cascade="all, delete-orphan",
+    )
+
+
+class ApprovalChainNodeApprover(Base):
+    __tablename__ = "approval_chain_node_approvers"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chain_node_id: Mapped[int] = mapped_column(Integer, ForeignKey("approval_chain_nodes.id"), nullable=False, index=True)
+    approver_role: Mapped[str] = mapped_column(String(64), nullable=False)
+    approver_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
+
+    chain_node: Mapped[ApprovalChainNode] = relationship("ApprovalChainNode", back_populates="approvers")
 
 
 class ApprovalNodeRecord(Base):
@@ -96,6 +119,7 @@ class ApprovalNodeRecord(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     approval_id: Mapped[int] = mapped_column(Integer, ForeignKey("approvals.id"), nullable=False, index=True)
     chain_node_id: Mapped[int] = mapped_column(Integer, ForeignKey("approval_chain_nodes.id"), nullable=False)
+    chain_node_approver_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("approval_chain_node_approvers.id"), nullable=True)
     level: Mapped[int] = mapped_column(Integer, nullable=False)
     approver_role: Mapped[str] = mapped_column(String(64), nullable=False)
     approver_name: Mapped[str] = mapped_column(String(128), nullable=False)

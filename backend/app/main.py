@@ -227,6 +227,53 @@ def _migrate_add_withdraw_reminder_columns():
         db.close()
 
 
+def _migrate_add_countersign_columns():
+    db: Session = SessionLocal()
+    try:
+        from sqlalchemy import inspect, text
+        from app.models import ApprovalMode
+        insp = inspect(engine)
+
+        if insp.has_table("approval_chain_nodes"):
+            chain_node_cols = {c["name"] for c in insp.get_columns("approval_chain_nodes")}
+            if "mode" not in chain_node_cols:
+                db.execute(text("ALTER TABLE approval_chain_nodes ADD COLUMN mode VARCHAR(32) NOT NULL DEFAULT 'single'"))
+                db.commit()
+                print("[数据迁移] approval_chain_nodes 新增 mode 列")
+
+        if insp.has_table("approval_node_records"):
+            node_record_cols = {c["name"] for c in insp.get_columns("approval_node_records")}
+            if "chain_node_approver_id" not in node_record_cols:
+                db.execute(text("ALTER TABLE approval_node_records ADD COLUMN chain_node_approver_id INTEGER"))
+                db.commit()
+                print("[数据迁移] approval_node_records 新增 chain_node_approver_id 列")
+
+        if not insp.has_table("approval_chain_node_approvers"):
+            print("[数据迁移] approval_chain_node_approvers 表将由 SQLAlchemy 自动创建")
+
+        if insp.has_table("approval_chain_nodes") and "approver_role" in {c["name"] for c in insp.get_columns("approval_chain_nodes")}:
+            existing_nodes = db.execute(text("SELECT id, chain_id, level, approver_role, approver_name, timeout_minutes FROM approval_chain_nodes WHERE id NOT IN (SELECT chain_node_id FROM approval_chain_node_approvers)")).fetchall()
+            if existing_nodes:
+                for node in existing_nodes:
+                    db.execute(
+                        text("INSERT INTO approval_chain_node_approvers (chain_node_id, approver_role, approver_name, created_at) VALUES (:chain_node_id, :approver_role, :approver_name, :created_at)"),
+                        {
+                            "chain_node_id": node[0],
+                            "approver_role": node[3],
+                            "approver_name": node[4],
+                            "created_at": __import__("datetime").datetime.now(),
+                        }
+                    )
+                db.commit()
+                print(f"[数据迁移] 已将 {len(existing_nodes)} 条原有审批链节点数据迁移到 approval_chain_node_approvers 表")
+
+    except Exception as e:
+        db.rollback()
+        print(f"[数据迁移] 会签功能迁移失败: {e}")
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
@@ -234,6 +281,7 @@ async def lifespan(app: FastAPI):
     _migrate_purchase_department()
     _migrate_add_timeout_proxy_columns()
     _migrate_add_withdraw_reminder_columns()
+    _migrate_add_countersign_columns()
     task = asyncio.create_task(_background_timeout_checker())
     yield
     task.cancel()
