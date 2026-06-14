@@ -167,6 +167,10 @@ class ApprovalNodeRecordResponse(BaseModel):
     status: ApprovalStatus
     opinion: str | None
     acted_at: datetime | None
+    timeout_at: datetime | None = None
+    is_escalated: bool = False
+    actual_approver: str | None = None
+    proxy_source: str | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -187,11 +191,13 @@ class ApprovalListResponse(BaseModel):
 class ChainNodeCreate(BaseModel):
     approver_role: str = Field(..., max_length=64)
     approver_name: str = Field(..., max_length=128)
+    timeout_minutes: int | None = None
 
 
 class ChainNodeUpdate(BaseModel):
     approver_role: str | None = Field(None, max_length=64)
     approver_name: str | None = Field(None, max_length=128)
+    timeout_minutes: int | None = None
 
 
 class ChainNodeResponse(BaseModel):
@@ -200,6 +206,7 @@ class ChainNodeResponse(BaseModel):
     level: int
     approver_role: str
     approver_name: str
+    timeout_minutes: int | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -407,3 +414,31 @@ class ModulePermissions(BaseModel):
 
 class PermissionTreeResponse(BaseModel):
     modules: list[ModulePermissions]
+
+
+class ApprovalProxyCreate(BaseModel):
+    proxy_user_id: int
+    start_time: datetime
+    end_time: datetime
+    reason: str | None = Field(None, max_length=256)
+
+
+class ApprovalProxyResponse(BaseModel):
+    id: int
+    principal_user_id: int
+    proxy_user_id: int
+    principal_name: str | None = None
+    proxy_name: str | None = None
+    start_time: datetime
+    end_time: datetime
+    is_active: bool
+    reason: str | None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ApprovalProxyListResponse(BaseModel):
+    total: int
+    items: list[ApprovalProxyResponse]

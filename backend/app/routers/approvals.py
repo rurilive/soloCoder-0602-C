@@ -14,6 +14,9 @@ from app.schemas import (
     ApprovalChainResponse,
     ApprovalChainListResponse,
     ChainNodesReorder,
+    ApprovalProxyCreate,
+    ApprovalProxyResponse,
+    ApprovalProxyListResponse,
 )
 from app import crud
 
@@ -99,6 +102,102 @@ def delete_approval_chain(
     current_user: User = Depends(require_permissions("chain:manage")),
 ):
     crud.delete_approval_chain(db, chain_id)
+
+
+@router.post("/timeout/check")
+def check_timeout(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permissions("approval:approve")),
+):
+    processed = crud.check_and_process_timeouts(db)
+    expired_proxies = crud.expire_outdated_proxies(db)
+    return {
+        "timeout_processed": processed,
+        "expired_proxies": expired_proxies,
+    }
+
+
+@router.post("/proxies", response_model=ApprovalProxyResponse, status_code=201)
+def create_proxy(
+    request: Request,
+    data: ApprovalProxyCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permissions("proxy:manage")),
+):
+    from app.auth import get_user_display_name
+    proxy = crud.create_approval_proxy(db, data, current_user)
+    result = ApprovalProxyResponse.model_validate(proxy)
+    principal = db.query(User).filter(User.id == proxy.principal_user_id).first()
+    proxy_user = db.query(User).filter(User.id == proxy.proxy_user_id).first()
+    if principal:
+        result.principal_name = get_user_display_name(principal)
+    if proxy_user:
+        result.proxy_name = get_user_display_name(proxy_user)
+    log_operation(
+        db,
+        module="proxy",
+        action="create",
+        user=current_user,
+        target_type="approval_proxy",
+        target_id=proxy.id,
+        detail=f"设置审批代理: 代理人 {result.proxy_name}, 时间 {data.start_time} ~ {data.end_time}",
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    return result
+
+
+@router.get("/proxies/list", response_model=ApprovalProxyListResponse)
+def list_proxies(
+    is_active: bool | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permissions("proxy:view")),
+):
+    from app.auth import get_user_display_name
+    items, total = crud.get_approval_proxies(db, current_user, is_active, page, page_size)
+    result = []
+    for proxy in items:
+        resp = ApprovalProxyResponse.model_validate(proxy)
+        principal = db.query(User).filter(User.id == proxy.principal_user_id).first()
+        proxy_user = db.query(User).filter(User.id == proxy.proxy_user_id).first()
+        if principal:
+            resp.principal_name = get_user_display_name(principal)
+        if proxy_user:
+            resp.proxy_name = get_user_display_name(proxy_user)
+        result.append(resp)
+    return ApprovalProxyListResponse(total=total, items=result)
+
+
+@router.delete("/proxies/{proxy_id}", response_model=ApprovalProxyResponse)
+def cancel_proxy(
+    request: Request,
+    proxy_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permissions("proxy:manage")),
+):
+    from app.auth import get_user_display_name
+    proxy = crud.cancel_approval_proxy(db, proxy_id, current_user)
+    result = ApprovalProxyResponse.model_validate(proxy)
+    principal = db.query(User).filter(User.id == proxy.principal_user_id).first()
+    proxy_user = db.query(User).filter(User.id == proxy.proxy_user_id).first()
+    if principal:
+        result.principal_name = get_user_display_name(principal)
+    if proxy_user:
+        result.proxy_name = get_user_display_name(proxy_user)
+    log_operation(
+        db,
+        module="proxy",
+        action="cancel",
+        user=current_user,
+        target_type="approval_proxy",
+        target_id=proxy.id,
+        detail=f"取消审批代理: 代理人 {result.proxy_name}",
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    return result
 
 
 @router.post("/asset/{asset_id}", response_model=ApprovalResponse)

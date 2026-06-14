@@ -1,19 +1,21 @@
 import qrcode
 import io
 import base64
-from datetime import datetime
+from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from fastapi import HTTPException
 from app.models import (
     Asset, AssetLog, AssetStatus, AssetCategory, ImportLog,
     Approval, ApprovalType, ApprovalStatus,
     ApprovalChain, ApprovalChainNode, ApprovalNodeRecord,
+    ApprovalProxy, OperationLog,
     User, Role, UserRole,
 )
 from app.schemas import (
     AssetCreate, AssetUpdate, AssetAllocate, AssetReturn, AssetScrap,
     ImportErrorItem, ApprovalCreate, ApprovalAction,
     ApprovalChainCreate, ApprovalChainUpdate, ChainNodesReorder,
+    ApprovalProxyCreate,
 )
 
 
@@ -524,7 +526,11 @@ def create_approval(db: Session, asset_id: int, data: ApprovalCreate, applicant:
             .order_by(ApprovalChainNode.level.asc())
             .all()
         )
+        now = datetime.now()
         for idx, node in enumerate(nodes):
+            timeout_at = None
+            if node.timeout_minutes is not None:
+                timeout_at = now + timedelta(minutes=node.timeout_minutes) if idx == 0 else None
             record = ApprovalNodeRecord(
                 approval_id=approval.id,
                 chain_node_id=node.id,
@@ -532,6 +538,7 @@ def create_approval(db: Session, asset_id: int, data: ApprovalCreate, applicant:
                 approver_role=node.approver_role,
                 approver_name=node.approver_name,
                 status=ApprovalStatus.PENDING,
+                timeout_at=timeout_at,
             )
             db.add(record)
 
@@ -636,6 +643,35 @@ def get_approval(db: Session, approval_id: int, current_user: User | None = None
     return approval
 
 
+def _check_circular_proxy(db: Session, principal_user_id: int, proxy_user_id: int, approval_applicant: str) -> bool:
+    proxy_user = db.query(User).filter(User.id == proxy_user_id).first()
+    if not proxy_user:
+        return False
+    proxy_display_name = proxy_user.real_name or proxy_user.username
+    if proxy_display_name == approval_applicant or proxy_user.username == approval_applicant:
+        return True
+    return False
+
+
+def _set_next_level_timeout(db: Session, approval: Approval):
+    next_record = (
+        db.query(ApprovalNodeRecord)
+        .filter(
+            ApprovalNodeRecord.approval_id == approval.id,
+            ApprovalNodeRecord.level == approval.current_level,
+        )
+        .first()
+    )
+    if next_record and next_record.timeout_at is None:
+        chain_node = (
+            db.query(ApprovalChainNode)
+            .filter(ApprovalChainNode.id == next_record.chain_node_id)
+            .first()
+        )
+        if chain_node and chain_node.timeout_minutes is not None:
+            next_record.timeout_at = datetime.now() + timedelta(minutes=chain_node.timeout_minutes)
+
+
 def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approver: User | None = None) -> Approval:
     approval = get_approval(db, approval_id)
     if approval.status != ApprovalStatus.PENDING:
@@ -663,7 +699,34 @@ def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approv
         if current_record.status != ApprovalStatus.PENDING:
             raise HTTPException(status_code=400, detail="当前节点已处理，不可重复操作")
 
-        if approver and not _user_is_approver_for_node(db, approver.id, current_record):
+        is_direct_approver = approver and _user_is_approver_for_node(db, approver.id, current_record)
+
+        is_proxy_approver = False
+        proxy_principal_name = None
+
+        if approver and not is_direct_approver:
+            active_proxies = (
+                db.query(ApprovalProxy)
+                .filter(
+                    ApprovalProxy.proxy_user_id == approver.id,
+                    ApprovalProxy.is_active == True,
+                    ApprovalProxy.start_time <= now,
+                    ApprovalProxy.end_time >= now,
+                )
+                .all()
+            )
+            for ap in active_proxies:
+                principal = db.query(User).filter(User.id == ap.principal_user_id).first()
+                if principal:
+                    principal_role_codes = _get_user_role_codes(db, principal.id)
+                    if current_record.approver_role in principal_role_codes:
+                        if _check_circular_proxy(db, principal.id, approver.id, approval.applicant):
+                            raise HTTPException(status_code=400, detail="循环代理检测：代理人同时也是申请人，无法代理审批")
+                        is_proxy_approver = True
+                        proxy_principal_name = principal.real_name or principal.username
+                        break
+
+        if approver and not is_direct_approver and not is_proxy_approver:
             raise HTTPException(
                 status_code=403,
                 detail=f"您没有权限审批此节点，当前节点需要角色: {current_record.approver_role}",
@@ -672,6 +735,10 @@ def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approv
         current_record.status = ApprovalStatus.APPROVED
         current_record.opinion = data.opinion
         current_record.acted_at = now
+
+        if is_proxy_approver and approver:
+            current_record.actual_approver = approver_name
+            current_record.proxy_source = proxy_principal_name
 
         all_records = (
             db.query(ApprovalNodeRecord)
@@ -683,14 +750,16 @@ def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approv
 
         if next_level <= approval.total_levels:
             approval.current_level = next_level
+            _set_next_level_timeout(db, approval)
 
             level_desc = f"第{approval.current_level - 1}/{approval.total_levels}级审批通过"
+            proxy_info = f"（代理审批，代理人: {approver_name}，代原审批人: {current_record.proxy_source}）" if current_record.proxy_source else ""
             log = AssetLog(
                 asset_id=asset.id,
                 action="多级审批通过",
                 operator=approver_name,
                 operator_id=approver_id,
-                detail=f"{level_desc}，审批人: {current_record.approver_name}。{data.opinion or ''}",
+                detail=f"{level_desc}，审批人: {current_record.approver_name}{proxy_info}。{data.opinion or ''}",
             )
             db.add(log)
             db.commit()
@@ -753,7 +822,33 @@ def reject_approval(db: Session, approval_id: int, data: ApprovalAction, approve
         if current_record.status != ApprovalStatus.PENDING:
             raise HTTPException(status_code=400, detail="当前节点已处理，不可重复操作")
 
-        if approver and not _user_is_approver_for_node(db, approver.id, current_record):
+        is_direct_approver = approver and _user_is_approver_for_node(db, approver.id, current_record)
+
+        is_proxy_approver = False
+        if approver and not is_direct_approver:
+            active_proxies = (
+                db.query(ApprovalProxy)
+                .filter(
+                    ApprovalProxy.proxy_user_id == approver.id,
+                    ApprovalProxy.is_active == True,
+                    ApprovalProxy.start_time <= now,
+                    ApprovalProxy.end_time >= now,
+                )
+                .all()
+            )
+            for ap in active_proxies:
+                principal = db.query(User).filter(User.id == ap.principal_user_id).first()
+                if principal:
+                    principal_role_codes = _get_user_role_codes(db, principal.id)
+                    if current_record.approver_role in principal_role_codes:
+                        if _check_circular_proxy(db, principal.id, approver.id, approval.applicant):
+                            raise HTTPException(status_code=400, detail="循环代理检测：代理人同时也是申请人，无法代理审批")
+                        is_proxy_approver = True
+                        current_record.actual_approver = approver_name
+                        current_record.proxy_source = principal.real_name or principal.username
+                        break
+
+        if approver and not is_direct_approver and not is_proxy_approver:
             raise HTTPException(
                 status_code=403,
                 detail=f"您没有权限审批此节点，当前节点需要角色: {current_record.approver_role}",
@@ -782,8 +877,11 @@ def reject_approval(db: Session, approval_id: int, data: ApprovalAction, approve
 
     action_type = "领用" if approval.approval_type == ApprovalType.ALLOCATE else "报废"
     level_info = f"（第{approval.current_level}/{approval.total_levels}级驳回）" if approval.total_levels > 1 else ""
+    proxy_info = ""
+    if current_record and current_record.proxy_source:
+        proxy_info = f"（代理审批，代理人: {current_record.actual_approver}，代原审批人: {current_record.proxy_source}）"
     action = f"{action_type}审批驳回"
-    detail = f"审批驳回{level_info}。{data.opinion or ''}"
+    detail = f"审批驳回{level_info}{proxy_info}。{data.opinion or ''}"
 
     log = AssetLog(
         asset_id=asset.id,
@@ -827,7 +925,50 @@ def get_my_pending_approvals(
             .distinct()
             .subquery()
         )
-        query = query.filter(Approval.id.in_(pending_node_subquery))
+
+        now = datetime.now()
+        active_proxy_principal_ids = [
+            ap.principal_user_id
+            for ap in db.query(ApprovalProxy)
+            .filter(
+                ApprovalProxy.proxy_user_id == current_user.id,
+                ApprovalProxy.is_active == True,
+                ApprovalProxy.start_time <= now,
+                ApprovalProxy.end_time >= now,
+            )
+            .all()
+        ]
+
+        proxy_approval_ids = set()
+        for pid in active_proxy_principal_ids:
+            principal = db.query(User).filter(User.id == pid).first()
+            if principal:
+                principal_role_codes = _get_user_role_codes(db, principal.id)
+                if principal_role_codes:
+                    proxy_ids = (
+                        db.query(ApprovalNodeRecord.approval_id)
+                        .filter(
+                            ApprovalNodeRecord.status == ApprovalStatus.PENDING,
+                            ApprovalNodeRecord.approver_role.in_(list(principal_role_codes)),
+                        )
+                        .distinct()
+                        .subquery()
+                    )
+                    for aid in db.query(Approval.id).filter(Approval.id.in_(proxy_ids)).all():
+                        approval_obj = db.query(Approval).filter(Approval.id == aid[0]).first()
+                        if approval_obj and approval_obj.applicant != (current_user.real_name or current_user.username) and approval_obj.applicant != current_user.username:
+                            proxy_approval_ids.add(aid[0])
+
+        from sqlalchemy import or_
+        if proxy_approval_ids:
+            query = query.filter(
+                or_(
+                    Approval.id.in_(pending_node_subquery),
+                    Approval.id.in_(list(proxy_approval_ids)),
+                )
+            )
+        else:
+            query = query.filter(Approval.id.in_(pending_node_subquery))
 
     if keyword:
         like = f"%{keyword}%"
@@ -919,6 +1060,7 @@ def create_approval_chain(db: Session, data: ApprovalChainCreate) -> ApprovalCha
             level=idx + 1,
             approver_role=node_data.approver_role,
             approver_name=node_data.approver_name,
+            timeout_minutes=node_data.timeout_minutes,
         )
         db.add(node)
 
@@ -982,6 +1124,7 @@ def update_approval_chain(db: Session, chain_id: int, data: ApprovalChainUpdate)
                 level=idx + 1,
                 approver_role=node_data.approver_role,
                 approver_name=node_data.approver_name,
+                timeout_minutes=node_data.timeout_minutes,
             )
             db.add(node)
 
@@ -1116,3 +1259,223 @@ def get_operation_logs(
         .all()
     )
     return items, total
+
+
+def check_and_process_timeouts(db: Session) -> list[dict]:
+    now = datetime.now()
+    timed_out_records = (
+        db.query(ApprovalNodeRecord)
+        .filter(
+            ApprovalNodeRecord.status == ApprovalStatus.PENDING,
+            ApprovalNodeRecord.timeout_at.isnot(None),
+            ApprovalNodeRecord.timeout_at < now,
+        )
+        .all()
+    )
+
+    processed = []
+    for record in timed_out_records:
+        approval = db.query(Approval).filter(Approval.id == record.approval_id).first()
+        if not approval or approval.status != ApprovalStatus.PENDING:
+            continue
+
+        asset = db.query(Asset).filter(Asset.id == approval.asset_id).first()
+        if not asset:
+            continue
+
+        record.status = ApprovalStatus.ESCALATED
+        record.is_escalated = True
+        record.acted_at = now
+        record.opinion = "审批超时，自动升级"
+
+        if record.level < approval.total_levels:
+            approval.current_level = record.level + 1
+            _set_next_level_timeout(db, approval)
+
+            log = AssetLog(
+                asset_id=asset.id,
+                action="审批超时升级",
+                operator="系统",
+                operator_id=None,
+                detail=f"第{record.level}/{approval.total_levels}级审批超时，自动升级到第{record.level + 1}级",
+            )
+            db.add(log)
+
+            op_log = OperationLog(
+                module="approval",
+                action="timeout_escalate",
+                operator="系统",
+                detail=f"审批单#{approval.id}第{record.level}级超时，升级到第{record.level + 1}级",
+            )
+            db.add(op_log)
+
+            processed.append({
+                "approval_id": approval.id,
+                "level": record.level,
+                "action": "escalated",
+                "new_level": record.level + 1,
+            })
+        else:
+            approval.status = ApprovalStatus.REJECTED
+            approval.approver = "系统"
+            approval.approval_opinion = "最高级审批超时，自动驳回"
+
+            asset.status = approval.previous_status
+
+            remaining_records = (
+                db.query(ApprovalNodeRecord)
+                .filter(
+                    ApprovalNodeRecord.approval_id == approval.id,
+                    ApprovalNodeRecord.level > record.level,
+                    ApprovalNodeRecord.status == ApprovalStatus.PENDING,
+                )
+                .all()
+            )
+            for r in remaining_records:
+                r.status = ApprovalStatus.REJECTED
+
+            log = AssetLog(
+                asset_id=asset.id,
+                action="审批超时驳回",
+                operator="系统",
+                operator_id=None,
+                detail=f"最高级（第{record.level}/{approval.total_levels}级）审批超时，自动驳回，资产状态恢复为{approval.previous_status.value}",
+            )
+            db.add(log)
+
+            op_log = OperationLog(
+                module="approval",
+                action="timeout_reject",
+                operator="系统",
+                detail=f"审批单#{approval.id}最高级审批超时，自动驳回",
+            )
+            db.add(op_log)
+
+            processed.append({
+                "approval_id": approval.id,
+                "level": record.level,
+                "action": "rejected",
+                "reason": "最高级审批超时",
+            })
+
+    if processed:
+        db.commit()
+
+    return processed
+
+
+def expire_outdated_proxies(db: Session) -> int:
+    now = datetime.now()
+    expired = (
+        db.query(ApprovalProxy)
+        .filter(
+            ApprovalProxy.is_active == True,
+            ApprovalProxy.end_time < now,
+        )
+        .all()
+    )
+    count = len(expired)
+    for proxy in expired:
+        proxy.is_active = False
+    if count > 0:
+        db.commit()
+    return count
+
+
+def create_approval_proxy(db: Session, data: ApprovalProxyCreate, current_user: User) -> ApprovalProxy:
+    if data.proxy_user_id == current_user.id:
+        raise HTTPException(status_code=400, detail="不能将自己设置为代理人")
+
+    if data.start_time >= data.end_time:
+        raise HTTPException(status_code=400, detail="开始时间必须早于结束时间")
+
+    if data.end_time <= datetime.now():
+        raise HTTPException(status_code=400, detail="结束时间必须晚于当前时间")
+
+    proxy_user = db.query(User).filter(User.id == data.proxy_user_id).first()
+    if not proxy_user:
+        raise HTTPException(status_code=404, detail="代理人用户不存在")
+    if not proxy_user.is_active:
+        raise HTTPException(status_code=400, detail="代理人用户已被禁用")
+
+    existing = (
+        db.query(ApprovalProxy)
+        .filter(
+            ApprovalProxy.principal_user_id == current_user.id,
+            ApprovalProxy.is_active == True,
+            ApprovalProxy.end_time > datetime.now(),
+        )
+        .first()
+    )
+    if existing:
+        raise HTTPException(status_code=400, detail="您已有生效中的代理设置，请先取消后再设置新代理")
+
+    existing_proxy_as_principal = (
+        db.query(ApprovalProxy)
+        .filter(
+            ApprovalProxy.principal_user_id == data.proxy_user_id,
+            ApprovalProxy.proxy_user_id == current_user.id,
+            ApprovalProxy.is_active == True,
+            ApprovalProxy.end_time > datetime.now(),
+        )
+        .first()
+    )
+    if existing_proxy_as_principal:
+        raise HTTPException(status_code=400, detail="检测到循环代理：对方已将您设为代理人，不能再将其设为您的代理人")
+
+    proxy = ApprovalProxy(
+        principal_user_id=current_user.id,
+        proxy_user_id=data.proxy_user_id,
+        start_time=data.start_time,
+        end_time=data.end_time,
+        reason=data.reason,
+        is_active=True,
+    )
+    db.add(proxy)
+    db.commit()
+    db.refresh(proxy)
+    return proxy
+
+
+def get_approval_proxies(
+    db: Session,
+    current_user: User | None = None,
+    is_active: bool | None = None,
+    page: int = 1,
+    page_size: int = 20,
+) -> tuple[list[ApprovalProxy], int]:
+    query = db.query(ApprovalProxy)
+
+    if current_user:
+        query = query.filter(
+            (ApprovalProxy.principal_user_id == current_user.id)
+            | (ApprovalProxy.proxy_user_id == current_user.id)
+        )
+
+    if is_active is not None:
+        query = query.filter(ApprovalProxy.is_active == is_active)
+
+    total = query.count()
+    items = (
+        query.order_by(ApprovalProxy.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+    return items, total
+
+
+def cancel_approval_proxy(db: Session, proxy_id: int, current_user: User) -> ApprovalProxy:
+    proxy = db.query(ApprovalProxy).filter(ApprovalProxy.id == proxy_id).first()
+    if not proxy:
+        raise HTTPException(status_code=404, detail="代理设置不存在")
+
+    if proxy.principal_user_id != current_user.id:
+        from app.auth import is_admin_user
+        if not is_admin_user(db, current_user.id):
+            raise HTTPException(status_code=403, detail="只有代理设置人或管理员可以取消代理")
+
+    proxy.is_active = False
+    db.commit()
+    db.refresh(proxy)
+    return proxy

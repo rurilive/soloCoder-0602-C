@@ -22,6 +22,7 @@ class ApprovalStatus(str, enum.Enum):
     PENDING = "pending"
     APPROVED = "approved"
     REJECTED = "rejected"
+    ESCALATED = "escalated"
 
 
 class AssetCategory(str, enum.Enum):
@@ -75,6 +76,7 @@ class ApprovalChainNode(Base):
     level: Mapped[int] = mapped_column(Integer, nullable=False)
     approver_role: Mapped[str] = mapped_column(String(64), nullable=False)
     approver_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    timeout_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
 
 
@@ -90,6 +92,10 @@ class ApprovalNodeRecord(Base):
     status: Mapped[ApprovalStatus] = mapped_column(Enum(ApprovalStatus), default=ApprovalStatus.PENDING, nullable=False)
     opinion: Mapped[str | None] = mapped_column(Text, nullable=True)
     acted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    timeout_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    is_escalated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    actual_approver: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    proxy_source: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
 
 
@@ -109,6 +115,20 @@ class Approval(Base):
     current_level: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     total_levels: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     chain_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("approval_chains.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+
+
+class ApprovalProxy(Base):
+    __tablename__ = "approval_proxies"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    principal_user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    proxy_user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    start_time: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    end_time: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    reason: Mapped[str | None] = mapped_column(String(256), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
 
@@ -252,6 +272,9 @@ DEFAULT_PERMISSIONS: list[dict] = [
     {"code": "chain:view", "name": "查看审批链", "module": "chain", "description": "查看审批链配置"},
     {"code": "chain:manage", "name": "管理审批链", "module": "chain", "description": "创建、修改、删除审批链"},
 
+    {"code": "proxy:manage", "name": "管理审批代理", "module": "proxy", "description": "设置和取消审批代理"},
+    {"code": "proxy:view", "name": "查看审批代理", "module": "proxy", "description": "查看审批代理设置"},
+
     {"code": "user:view", "name": "查看用户", "module": "user", "description": "查看用户列表和详情"},
     {"code": "user:create", "name": "创建用户", "module": "user", "description": "新增用户账号"},
     {"code": "user:edit", "name": "编辑用户", "module": "user", "description": "修改用户信息"},
@@ -285,6 +308,7 @@ DEFAULT_ROLES: list[dict] = [
             "asset:import", "asset:export",
             "approval:view", "approval:submit", "approval:approve", "approval:reject",
             "chain:view", "chain:manage",
+            "proxy:manage", "proxy:view",
             "log:view",
         ],
     },
@@ -296,6 +320,7 @@ DEFAULT_ROLES: list[dict] = [
         "permissions": [
             "asset:view",
             "approval:view", "approval:approve", "approval:reject",
+            "proxy:manage", "proxy:view",
         ],
     },
     {
@@ -306,6 +331,7 @@ DEFAULT_ROLES: list[dict] = [
         "permissions": [
             "asset:view", "asset:export",
             "approval:view", "approval:approve", "approval:reject",
+            "proxy:manage", "proxy:view",
             "log:view",
         ],
     },

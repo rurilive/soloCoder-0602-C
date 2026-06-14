@@ -1,4 +1,6 @@
 from contextlib import asynccontextmanager
+import asyncio
+import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -21,6 +23,29 @@ from app.models import (
     SUPER_ADMIN_USER,
 )
 from app.auth import get_password_hash
+
+logger = logging.getLogger(__name__)
+
+
+async def _background_timeout_checker():
+    while True:
+        try:
+            await asyncio.sleep(60)
+            db: Session = SessionLocal()
+            try:
+                from app.crud import check_and_process_timeouts, expire_outdated_proxies
+                processed = check_and_process_timeouts(db)
+                expired = expire_outdated_proxies(db)
+                if processed or expired:
+                    logger.info(f"[后台任务] 超时处理: {len(processed)}条, 代理过期: {expired}条")
+            except Exception as e:
+                logger.error(f"[后台任务] 超时检查失败: {e}")
+            finally:
+                db.close()
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"[后台任务] 异常: {e}")
 
 
 def _init_rbac_data():
@@ -136,12 +161,54 @@ def _migrate_purchase_department():
         db.close()
 
 
+def _migrate_add_timeout_proxy_columns():
+    db: Session = SessionLocal()
+    try:
+        from sqlalchemy import inspect, text
+        insp = inspect(engine)
+
+        chain_node_cols = {c["name"] for c in insp.get_columns("approval_chain_nodes")}
+        if "timeout_minutes" not in chain_node_cols:
+            db.execute(text("ALTER TABLE approval_chain_nodes ADD COLUMN timeout_minutes INTEGER"))
+            db.commit()
+            print("[数据迁移] approval_chain_nodes 新增 timeout_minutes 列")
+
+        node_record_cols = {c["name"] for c in insp.get_columns("approval_node_records")}
+        new_cols = {
+            "timeout_at": "DATETIME",
+            "is_escalated": "BOOLEAN DEFAULT 0",
+            "actual_approver": "VARCHAR(128)",
+            "proxy_source": "VARCHAR(128)",
+        }
+        for col_name, col_type in new_cols.items():
+            if col_name not in node_record_cols:
+                db.execute(text(f"ALTER TABLE approval_node_records ADD COLUMN {col_name} {col_type}"))
+                db.commit()
+                print(f"[数据迁移] approval_node_records 新增 {col_name} 列")
+
+        if not insp.has_table("approval_proxies"):
+            print("[数据迁移] approval_proxies 表将由 SQLAlchemy 自动创建")
+
+    except Exception as e:
+        db.rollback()
+        print(f"[数据迁移] 迁移失败: {e}")
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
     _init_rbac_data()
     _migrate_purchase_department()
+    _migrate_add_timeout_proxy_columns()
+    task = asyncio.create_task(_background_timeout_checker())
     yield
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
 
 
 app = FastAPI(
