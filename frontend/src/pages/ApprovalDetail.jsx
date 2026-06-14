@@ -25,8 +25,8 @@ function getLevelState(levelRecords, approval) {
   if (hasRejected) return 'rejected'
   const allApproved = levelRecords.length > 0 && levelRecords.every((r) => r.status === 'approved')
   if (allApproved) return 'approved'
-  const hasEscalated = levelRecords.some((r) => r.status === 'escalated')
-  if (hasEscalated || (approval.status === 'pending' && levelRecords[0]?.level === approval.current_level)) return 'current'
+  const isCurrentLevel = levelRecords[0]?.level === approval.current_level
+  if (approval.status === 'pending' && isCurrentLevel) return 'current'
   return 'pending'
 }
 
