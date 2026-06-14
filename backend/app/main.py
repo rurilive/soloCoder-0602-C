@@ -15,6 +15,7 @@ from app.models import (
     RolePermission,
     User,
     UserRole,
+    Asset,
     DEFAULT_PERMISSIONS,
     DEFAULT_ROLES,
     SUPER_ADMIN_USER,
@@ -83,10 +84,63 @@ def _init_rbac_data():
         db.close()
 
 
+def _migrate_purchase_department():
+    """
+    一次性数据迁移：对所有 purchase_department 为 null 的资产，
+    根据其 assignee 反查 User 表的 department 字段进行回填。
+    assignee 也为 null 的保持不动。
+    """
+    db: Session = SessionLocal()
+    try:
+        assets_to_migrate = db.query(Asset).filter(Asset.purchase_department.is_(None)).all()
+        if not assets_to_migrate:
+            print("[数据迁移] 没有需要迁移的存量资产数据")
+            return
+
+        all_users = db.query(User).filter(User.is_active == True).all()
+        user_dept_map = {}
+        for user in all_users:
+            display_name = user.real_name or user.username
+            user_dept_map[display_name] = user.department
+            user_dept_map[user.username] = user.department
+            if user.real_name:
+                user_dept_map[user.real_name] = user.department
+
+        updated_count = 0
+        skipped_count = 0
+
+        for asset in assets_to_migrate:
+            if asset.assignee is None:
+                skipped_count += 1
+                continue
+
+            dept = user_dept_map.get(asset.assignee)
+            if dept:
+                asset.purchase_department = dept
+                updated_count += 1
+            else:
+                skipped_count += 1
+
+        db.commit()
+
+        print(f"[数据迁移] 存量资产 purchase_department 迁移完成:")
+        print(f"  - 总共有 {len(assets_to_migrate)} 条资产需要迁移")
+        print(f"  - 成功回填 {updated_count} 条")
+        print(f"  - 跳过 {skipped_count} 条（未分配或找不到对应用户）")
+
+    except Exception as e:
+        db.rollback()
+        print(f"[数据迁移] 迁移失败: {e}")
+        raise e
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
     _init_rbac_data()
+    _migrate_purchase_department()
     yield
 
 
