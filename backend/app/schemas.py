@@ -14,6 +14,7 @@ class AssetCreate(BaseModel):
     notes: str | None = None
     purchase_date: str | None = None
     purchase_price: float | None = None
+    purchase_department: str | None = None
 
 
 class AssetUpdate(BaseModel):
@@ -27,6 +28,7 @@ class AssetUpdate(BaseModel):
     notes: str | None = None
     purchase_date: str | None = None
     purchase_price: float | None = None
+    purchase_department: str | None = None
 
 
 class AssetAllocate(BaseModel):
@@ -55,6 +57,7 @@ class AssetResponse(BaseModel):
     notes: str | None
     purchase_date: str | None
     purchase_price: float | None
+    purchase_department: str | None
     created_at: datetime
     updated_at: datetime
 

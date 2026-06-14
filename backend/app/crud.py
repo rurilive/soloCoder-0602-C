@@ -83,7 +83,12 @@ def create_asset(db: Session, data: AssetCreate, operator: User | None = None) -
     if existing:
         raise HTTPException(status_code=400, detail="序列号已存在")
     asset_tag = generate_asset_tag(db)
-    asset = Asset(asset_tag=asset_tag, status=AssetStatus.IN_STOCK, **data.model_dump())
+
+    asset_data = data.model_dump()
+    if not asset_data.get("purchase_department") and operator and operator.department:
+        asset_data["purchase_department"] = operator.department
+
+    asset = Asset(asset_tag=asset_tag, status=AssetStatus.IN_STOCK, **asset_data)
     db.add(asset)
 
     op_name = operator.real_name or operator.username if operator else "system"
@@ -154,8 +159,12 @@ def get_asset(db: Session, asset_id: int, current_user: User | None = None) -> A
         user_name = get_user_display_name(current_user)
         if is_dept_manager(db, current_user.id):
             dept_users = get_dept_user_names(db, current_user.department)
-            if asset.assignee is not None and asset.assignee not in dept_users:
-                raise HTTPException(status_code=403, detail="无权查看此资产")
+            if asset.assignee is not None:
+                if asset.assignee not in dept_users:
+                    raise HTTPException(status_code=403, detail="无权查看此资产")
+            else:
+                if asset.purchase_department != current_user.department:
+                    raise HTTPException(status_code=403, detail="无权查看此资产")
         else:
             if asset.assignee != user_name:
                 raise HTTPException(status_code=403, detail="无权查看此资产")
@@ -174,8 +183,12 @@ def get_asset_by_tag(db: Session, asset_tag: str, current_user: User | None = No
         user_name = get_user_display_name(current_user)
         if is_dept_manager(db, current_user.id):
             dept_users = get_dept_user_names(db, current_user.department)
-            if asset.assignee is not None and asset.assignee not in dept_users:
-                raise HTTPException(status_code=403, detail="无权查看此资产")
+            if asset.assignee is not None:
+                if asset.assignee not in dept_users:
+                    raise HTTPException(status_code=403, detail="无权查看此资产")
+            else:
+                if asset.purchase_department != current_user.department:
+                    raise HTTPException(status_code=403, detail="无权查看此资产")
         else:
             if asset.assignee != user_name:
                 raise HTTPException(status_code=403, detail="无权查看此资产")
@@ -346,9 +359,13 @@ def batch_import_assets(db: Session, file_bytes: bytes, file_name: str, operator
         }
 
     created_assets: list[Asset] = []
+    operator_dept = operator.department if operator and operator.department else None
     for record in data_rows:
         category = CATEGORY_CN_MAP[record["category"]]
         asset_tag = generate_asset_tag(db)
+        purchase_dept = record.get("purchase_department")
+        if not purchase_dept:
+            purchase_dept = operator_dept
         asset = Asset(
             asset_tag=asset_tag,
             name=record["name"],
@@ -362,6 +379,7 @@ def batch_import_assets(db: Session, file_bytes: bytes, file_name: str, operator
             notes=record.get("notes"),
             purchase_date=record.get("purchase_date"),
             purchase_price=float(record["purchase_price"]) if record.get("purchase_price") else None,
+            purchase_department=purchase_dept,
         )
         db.add(asset)
         created_assets.append(asset)
