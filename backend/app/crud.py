@@ -549,12 +549,10 @@ def create_approval(db: Session, asset_id: int, data: ApprovalCreate, applicant:
             .all()
         )
         now = datetime.now()
-        cumulative_minutes = 0
         for idx, node in enumerate(nodes):
             timeout_at = None
-            if node.timeout_minutes is not None:
-                cumulative_minutes += node.timeout_minutes
-                timeout_at = now + timedelta(minutes=cumulative_minutes)
+            if idx == 0 and node.timeout_minutes is not None:
+                timeout_at = now + timedelta(minutes=node.timeout_minutes)
             record = ApprovalNodeRecord(
                 approval_id=approval.id,
                 chain_node_id=node.id,
