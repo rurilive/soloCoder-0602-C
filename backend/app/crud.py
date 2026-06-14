@@ -8,6 +8,7 @@ from app.models import (
     Asset, AssetLog, AssetStatus, AssetCategory, ImportLog,
     Approval, ApprovalType, ApprovalStatus,
     ApprovalChain, ApprovalChainNode, ApprovalNodeRecord,
+    User, Role, UserRole,
 )
 from app.schemas import (
     AssetCreate, AssetUpdate, AssetAllocate, AssetReturn, AssetScrap,
@@ -77,17 +78,22 @@ def generate_asset_tag(db: Session) -> str:
     return f"{prefix}{seq:04d}"
 
 
-def create_asset(db: Session, data: AssetCreate) -> Asset:
+def create_asset(db: Session, data: AssetCreate, operator: User | None = None) -> Asset:
     existing = db.query(Asset).filter(Asset.serial_number == data.serial_number).first()
     if existing:
         raise HTTPException(status_code=400, detail="序列号已存在")
     asset_tag = generate_asset_tag(db)
     asset = Asset(asset_tag=asset_tag, status=AssetStatus.IN_STOCK, **data.model_dump())
     db.add(asset)
+
+    op_name = operator.real_name or operator.username if operator else "system"
+    op_id = operator.id if operator else None
+
     log = AssetLog(
         asset_id=0,
         action="入库",
-        operator="system",
+        operator=op_name,
+        operator_id=op_id,
         detail=f"新资产入库: {asset_tag}",
     )
     db.add(log)
@@ -162,28 +168,34 @@ def update_asset(db: Session, asset_id: int, data: AssetUpdate) -> Asset:
     return asset
 
 
-def allocate_asset(db: Session, asset_id: int, data: AssetAllocate) -> Asset:
+def allocate_asset(db: Session, asset_id: int, data: AssetAllocate, applicant: User | None = None) -> Asset:
+    applicant_name = applicant.real_name or applicant.username if applicant else data.assignee
     approval_data = ApprovalCreate(
         approval_type=ApprovalType.ALLOCATE,
-        applicant=data.assignee,
+        applicant=applicant_name,
         assignee=data.assignee,
         reason="资产领用申请",
     )
-    create_approval(db, asset_id, approval_data)
+    create_approval(db, asset_id, approval_data, applicant)
     return get_asset(db, asset_id)
 
 
-def return_asset(db: Session, asset_id: int, data: AssetReturn) -> Asset:
+def return_asset(db: Session, asset_id: int, data: AssetReturn, operator: User | None = None) -> Asset:
     asset = get_asset(db, asset_id)
     if asset.status != AssetStatus.ALLOCATED:
         raise HTTPException(status_code=400, detail=f"资产当前状态为 {asset.status.value}，无法归还")
     assignee = asset.assignee
     asset.status = AssetStatus.RETURNED
     asset.assignee = None
+
+    op_name = operator.real_name or operator.username if operator else (assignee or "unknown")
+    op_id = operator.id if operator else None
+
     log = AssetLog(
         asset_id=asset.id,
         action="归还",
-        operator=assignee or "unknown",
+        operator=op_name,
+        operator_id=op_id,
         detail=data.notes or "资产归还",
     )
     db.add(log)
@@ -192,13 +204,14 @@ def return_asset(db: Session, asset_id: int, data: AssetReturn) -> Asset:
     return asset
 
 
-def scrap_asset(db: Session, asset_id: int, data: AssetScrap) -> Asset:
+def scrap_asset(db: Session, asset_id: int, data: AssetScrap, applicant: User | None = None) -> Asset:
+    applicant_name = applicant.real_name or applicant.username if applicant else "admin"
     approval_data = ApprovalCreate(
         approval_type=ApprovalType.SCRAP,
-        applicant="admin",
+        applicant=applicant_name,
         reason=data.notes or "资产报废申请",
     )
-    create_approval(db, asset_id, approval_data)
+    create_approval(db, asset_id, approval_data, applicant)
     return get_asset(db, asset_id)
 
 
@@ -222,7 +235,7 @@ def generate_qr_code_base64(asset_tag: str, base_url: str) -> str:
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
-def batch_import_assets(db: Session, file_bytes: bytes, file_name: str) -> dict:
+def batch_import_assets(db: Session, file_bytes: bytes, file_name: str, operator: User | None = None) -> dict:
     import openpyxl
 
     try:
@@ -320,11 +333,15 @@ def batch_import_assets(db: Session, file_bytes: bytes, file_name: str) -> dict:
         db.add(asset)
         created_assets.append(asset)
 
+    op_name = operator.real_name or operator.username if operator else "admin"
+    op_id = operator.id if operator else None
+
     import_log = ImportLog(
         total_rows=len(data_rows),
         success_count=len(data_rows),
         file_name=file_name,
-        operator="admin",
+        operator=op_name,
+        operator_id=op_id,
         detail=f"批量导入{len(data_rows)}条资产",
     )
     db.add(import_log)
@@ -335,7 +352,8 @@ def batch_import_assets(db: Session, file_bytes: bytes, file_name: str) -> dict:
         log = AssetLog(
             asset_id=asset.id,
             action="批量入库",
-            operator="admin",
+            operator=op_name,
+            operator_id=op_id,
             detail=f"批量导入入库: {asset.asset_tag}",
         )
         db.add(log)
@@ -372,7 +390,25 @@ def _find_matching_chain(db: Session, approval_type: ApprovalType, price: float 
     return chains[0] if chains else None
 
 
-def create_approval(db: Session, asset_id: int, data: ApprovalCreate) -> Approval:
+def _get_user_role_codes(db: Session, user_id: int) -> set[str]:
+    urs = db.query(UserRole).filter(UserRole.user_id == user_id).all()
+    role_ids = [ur.role_id for ur in urs]
+    if not role_ids:
+        return set()
+    roles = db.query(Role).filter(Role.id.in_(role_ids)).all()
+    return {r.code for r in roles}
+
+
+def _user_is_approver_for_node(db: Session, user_id: int, node_record: ApprovalNodeRecord) -> bool:
+    if user_id is None:
+        return False
+    user_role_codes = _get_user_role_codes(db, user_id)
+    if "super_admin" in user_role_codes or "asset_admin" in user_role_codes:
+        return True
+    return node_record.approver_role in user_role_codes
+
+
+def create_approval(db: Session, asset_id: int, data: ApprovalCreate, applicant: User | None = None) -> Approval:
     asset = get_asset(db, asset_id)
 
     if asset.status == AssetStatus.PENDING_APPROVAL:
@@ -450,10 +486,13 @@ def create_approval(db: Session, asset_id: int, data: ApprovalCreate) -> Approva
 
     action_type = "领用申请" if data.approval_type == ApprovalType.ALLOCATE else "报废申请"
     chain_info = f"（{total_levels}级审批链）" if total_levels > 1 else ""
+
+    op_id = applicant.id if applicant else None
     log = AssetLog(
         asset_id=asset_id,
         action=action_type,
         operator=data.applicant,
+        operator_id=op_id,
         detail=data.reason or f"提交{action_type}{chain_info}",
     )
     db.add(log)
@@ -505,7 +544,7 @@ def get_approval(db: Session, approval_id: int) -> Approval:
     return approval
 
 
-def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approver: str = "admin") -> Approval:
+def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approver: User | None = None) -> Approval:
     approval = get_approval(db, approval_id)
     if approval.status != ApprovalStatus.PENDING:
         raise HTTPException(status_code=400, detail="审批单已处理，不可重复操作")
@@ -513,6 +552,9 @@ def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approv
     asset = get_asset(db, approval.asset_id)
     if asset.status != AssetStatus.PENDING_APPROVAL:
         raise HTTPException(status_code=400, detail="资产状态异常，不是待审批状态")
+
+    approver_name = approver.real_name or approver.username if approver else "admin"
+    approver_id = approver.id if approver else None
 
     now = datetime.now()
 
@@ -528,6 +570,13 @@ def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approv
     if current_record:
         if current_record.status != ApprovalStatus.PENDING:
             raise HTTPException(status_code=400, detail="当前节点已处理，不可重复操作")
+
+        if approver and not _user_is_approver_for_node(db, approver.id, current_record):
+            raise HTTPException(
+                status_code=403,
+                detail=f"您没有权限审批此节点，当前节点需要角色: {current_record.approver_role}",
+            )
+
         current_record.status = ApprovalStatus.APPROVED
         current_record.opinion = data.opinion
         current_record.acted_at = now
@@ -547,7 +596,8 @@ def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approv
             log = AssetLog(
                 asset_id=asset.id,
                 action="多级审批通过",
-                operator=approver,
+                operator=approver_name,
+                operator_id=approver_id,
                 detail=f"{level_desc}，审批人: {current_record.approver_name}。{data.opinion or ''}",
             )
             db.add(log)
@@ -556,7 +606,7 @@ def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approv
             return approval
 
     approval.status = ApprovalStatus.APPROVED
-    approval.approver = approver
+    approval.approver = approver_name
     approval.approval_opinion = data.opinion
 
     if approval.approval_type == ApprovalType.ALLOCATE:
@@ -573,7 +623,8 @@ def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approv
     log = AssetLog(
         asset_id=asset.id,
         action=action,
-        operator=approver,
+        operator=approver_name,
+        operator_id=approver_id,
         detail=detail,
     )
     db.add(log)
@@ -583,7 +634,7 @@ def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approv
     return approval
 
 
-def reject_approval(db: Session, approval_id: int, data: ApprovalAction, approver: str = "admin") -> Approval:
+def reject_approval(db: Session, approval_id: int, data: ApprovalAction, approver: User | None = None) -> Approval:
     approval = get_approval(db, approval_id)
     if approval.status != ApprovalStatus.PENDING:
         raise HTTPException(status_code=400, detail="审批单已处理，不可重复操作")
@@ -591,6 +642,9 @@ def reject_approval(db: Session, approval_id: int, data: ApprovalAction, approve
     asset = get_asset(db, approval.asset_id)
     if asset.status != AssetStatus.PENDING_APPROVAL:
         raise HTTPException(status_code=400, detail="资产状态异常，不是待审批状态")
+
+    approver_name = approver.real_name or approver.username if approver else "admin"
+    approver_id = approver.id if approver else None
 
     now = datetime.now()
 
@@ -606,6 +660,13 @@ def reject_approval(db: Session, approval_id: int, data: ApprovalAction, approve
     if current_record:
         if current_record.status != ApprovalStatus.PENDING:
             raise HTTPException(status_code=400, detail="当前节点已处理，不可重复操作")
+
+        if approver and not _user_is_approver_for_node(db, approver.id, current_record):
+            raise HTTPException(
+                status_code=403,
+                detail=f"您没有权限审批此节点，当前节点需要角色: {current_record.approver_role}",
+            )
+
         current_record.status = ApprovalStatus.REJECTED
         current_record.opinion = data.opinion
         current_record.acted_at = now
@@ -622,7 +683,7 @@ def reject_approval(db: Session, approval_id: int, data: ApprovalAction, approve
             r.status = ApprovalStatus.REJECTED
 
     approval.status = ApprovalStatus.REJECTED
-    approval.approver = approver
+    approval.approver = approver_name
     approval.approval_opinion = data.opinion
 
     asset.status = approval.previous_status
@@ -635,7 +696,8 @@ def reject_approval(db: Session, approval_id: int, data: ApprovalAction, approve
     log = AssetLog(
         asset_id=asset.id,
         action=action,
-        operator=approver,
+        operator=approver_name,
+        operator_id=approver_id,
         detail=detail,
     )
     db.add(log)
@@ -643,6 +705,100 @@ def reject_approval(db: Session, approval_id: int, data: ApprovalAction, approve
     db.commit()
     db.refresh(approval)
     return approval
+
+
+def get_my_pending_approvals(
+    db: Session,
+    current_user: User,
+    status: ApprovalStatus | None = None,
+    approval_type: ApprovalType | None = None,
+    keyword: str | None = None,
+    page: int = 1,
+    page_size: int = 20,
+) -> tuple[list[Approval], int]:
+    user_role_codes = _get_user_role_codes(db, current_user.id)
+
+    query = db.query(Approval)
+
+    if status:
+        query = query.filter(Approval.status == status)
+    if approval_type:
+        query = query.filter(Approval.approval_type == approval_type)
+
+    if "super_admin" not in user_role_codes and "asset_admin" not in user_role_codes:
+        pending_node_subquery = (
+            db.query(ApprovalNodeRecord.approval_id)
+            .filter(
+                ApprovalNodeRecord.status == ApprovalStatus.PENDING,
+                ApprovalNodeRecord.approver_role.in_(list(user_role_codes)) if user_role_codes else ApprovalNodeRecord.approver_role == "__none__",
+            )
+            .distinct()
+            .subquery()
+        )
+        query = query.filter(Approval.id.in_(pending_node_subquery))
+
+    if keyword:
+        like = f"%{keyword}%"
+        asset_ids = db.query(Asset.id).filter(
+            (Asset.name.like(like))
+            | (Asset.asset_tag.like(like))
+            | (Asset.serial_number.like(like))
+        ).all()
+        asset_id_list = [aid[0] for aid in asset_ids]
+        if asset_id_list:
+            query = query.filter(Approval.asset_id.in_(asset_id_list))
+        else:
+            return [], 0
+
+    total = query.count()
+    items = (
+        query.order_by(Approval.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+    return items, total
+
+
+def get_my_submitted_approvals(
+    db: Session,
+    current_user: User,
+    status: ApprovalStatus | None = None,
+    approval_type: ApprovalType | None = None,
+    keyword: str | None = None,
+    page: int = 1,
+    page_size: int = 20,
+) -> tuple[list[Approval], int]:
+    user_name = current_user.real_name or current_user.username
+
+    query = db.query(Approval).filter(Approval.applicant == user_name)
+
+    if status:
+        query = query.filter(Approval.status == status)
+    if approval_type:
+        query = query.filter(Approval.approval_type == approval_type)
+
+    if keyword:
+        like = f"%{keyword}%"
+        asset_ids = db.query(Asset.id).filter(
+            (Asset.name.like(like))
+            | (Asset.asset_tag.like(like))
+            | (Asset.serial_number.like(like))
+        ).all()
+        asset_id_list = [aid[0] for aid in asset_ids]
+        if asset_id_list:
+            query = query.filter(Approval.asset_id.in_(asset_id_list))
+        else:
+            return [], 0
+
+    total = query.count()
+    items = (
+        query.order_by(Approval.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+    return items, total
 
 
 def get_approval_node_records(db: Session, approval_id: int) -> list[ApprovalNodeRecord]:

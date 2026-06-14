@@ -1,5 +1,5 @@
 from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, EmailStr
 from app.models import AssetStatus, AssetCategory, ApprovalType, ApprovalStatus
 
 
@@ -218,3 +218,181 @@ class ApprovalChainListResponse(BaseModel):
 
 class ChainNodesReorder(BaseModel):
     node_ids: list[int]
+
+
+# ==================== Auth Schemas ====================
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
+class TokenData(BaseModel):
+    user_id: int | None = None
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(..., max_length=64)
+    password: str = Field(..., min_length=1)
+
+
+class RegisterRequest(BaseModel):
+    username: str = Field(..., max_length=64)
+    email: EmailStr
+    password: str = Field(..., min_length=6, max_length=128)
+    real_name: str | None = Field(None, max_length=64)
+    department: str | None = Field(None, max_length=128)
+    position: str | None = Field(None, max_length=128)
+    phone: str | None = Field(None, max_length=32)
+
+
+class PasswordChange(BaseModel):
+    old_password: str = Field(..., min_length=1)
+    new_password: str = Field(..., min_length=6, max_length=128)
+
+
+# ==================== Permission Schemas ====================
+
+class PermissionResponse(BaseModel):
+    id: int
+    name: str
+    code: str
+    description: str | None
+    module: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class PermissionListResponse(BaseModel):
+    total: int
+    items: list[PermissionResponse]
+
+
+# ==================== Role Schemas ====================
+
+class RoleCreate(BaseModel):
+    name: str = Field(..., max_length=128)
+    code: str = Field(..., max_length=64)
+    description: str | None = Field(None, max_length=256)
+    permission_ids: list[int] = []
+
+
+class RoleUpdate(BaseModel):
+    name: str | None = Field(None, max_length=128)
+    description: str | None = Field(None, max_length=256)
+    permission_ids: list[int] | None = None
+
+
+class RoleBrief(BaseModel):
+    id: int
+    name: str
+    code: str
+    description: str | None
+
+    model_config = {"from_attributes": True}
+
+
+class RoleResponse(BaseModel):
+    id: int
+    name: str
+    code: str
+    description: str | None
+    is_builtin: bool
+    permissions: list[PermissionResponse] = []
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class RoleListResponse(BaseModel):
+    total: int
+    items: list[RoleResponse]
+
+
+# ==================== User Schemas ====================
+
+class UserCreate(BaseModel):
+    username: str = Field(..., max_length=64)
+    email: EmailStr
+    password: str = Field(..., min_length=6, max_length=128)
+    real_name: str | None = Field(None, max_length=64)
+    department: str | None = Field(None, max_length=128)
+    position: str | None = Field(None, max_length=128)
+    phone: str | None = Field(None, max_length=32)
+    role_ids: list[int] = []
+
+
+class UserUpdate(BaseModel):
+    email: EmailStr | None = None
+    real_name: str | None = Field(None, max_length=64)
+    department: str | None = Field(None, max_length=128)
+    position: str | None = Field(None, max_length=128)
+    phone: str | None = Field(None, max_length=32)
+    is_active: bool | None = None
+    avatar: str | None = Field(None, max_length=256)
+
+
+class UserAssignRoles(BaseModel):
+    role_ids: list[int]
+
+
+class UserBrief(BaseModel):
+    id: int
+    username: str
+    real_name: str | None
+    avatar: str | None
+    department: str | None
+    position: str | None
+
+    model_config = {"from_attributes": True}
+
+
+class UserResponse(BaseModel):
+    id: int
+    username: str
+    email: str
+    real_name: str | None
+    is_active: bool
+    avatar: str | None
+    department: str | None
+    position: str | None
+    phone: str | None
+    roles: list[RoleBrief] = []
+    permissions: list[str] = []
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class UserListResponse(BaseModel):
+    total: int
+    items: list[UserResponse]
+
+
+class UserProfileResponse(BaseModel):
+    id: int
+    username: str
+    email: str
+    real_name: str | None
+    is_active: bool
+    avatar: str | None
+    department: str | None
+    position: str | None
+    phone: str | None
+    roles: list[RoleBrief] = []
+    permissions: list[str] = []
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ModulePermissions(BaseModel):
+    module: str
+    permissions: list[PermissionResponse]
+
+
+class PermissionTreeResponse(BaseModel):
+    modules: list[ModulePermissions]
