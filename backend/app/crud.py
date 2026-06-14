@@ -977,6 +977,38 @@ def withdraw_approval(db: Session, approval_id: int, reason: str | None = None, 
 
     asset.status = approval.previous_status
 
+    pending_approver_roles = set()
+    for record in node_records:
+        if record.status == ApprovalStatus.WITHDRAWN and record.opinion == "审批已撤回":
+            pending_approver_roles.add(record.approver_role)
+
+    if pending_approver_roles:
+        affected_role_ids = (
+            db.query(UserRole.role_id)
+            .join(Role, UserRole.role_id == Role.id)
+            .filter(Role.code.in_(pending_approver_roles))
+            .distinct()
+            .subquery()
+        )
+        affected_user_ids = [
+            ur.user_id
+            for ur in db.query(UserRole.user_id)
+            .filter(UserRole.role_id.in_(affected_role_ids))
+            .distinct()
+            .all()
+        ]
+        if affected_user_ids:
+            active_related_proxies = (
+                db.query(ApprovalProxy)
+                .filter(
+                    ApprovalProxy.principal_user_id.in_(affected_user_ids),
+                    ApprovalProxy.is_active == True,
+                )
+                .all()
+            )
+            for proxy in active_related_proxies:
+                proxy.is_active = False
+
     applicant_display = applicant.real_name or applicant.username if applicant else approval.applicant
     applicant_id = applicant.id if applicant else None
 
@@ -1111,6 +1143,15 @@ def remind_approval(db: Session, approval_id: int, message: str | None = None, a
     approval.reminder_count = approval.reminder_count + 1
     approval.last_reminder_at = now
 
+    node_reminder_count = (
+        db.query(ApprovalReminder)
+        .filter(
+            ApprovalReminder.approval_id == approval_id,
+            ApprovalReminder.level == approval.current_level,
+        )
+        .count()
+    )
+
     approver_users = _find_users_by_role(db, current_record.approver_role)
 
     action_type = "领用" if approval.approval_type == ApprovalType.ALLOCATE else "报废"
@@ -1133,8 +1174,8 @@ def remind_approval(db: Session, approval_id: int, message: str | None = None, a
             related_type="approval",
         )
 
-    if approval.reminder_count >= 3:
-        _trigger_escalation_by_reminder(db, approval, current_record)
+    if node_reminder_count >= 3:
+        _trigger_escalation_by_reminder(db, approval, current_record, node_reminder_count)
 
     applicant_display = applicant.real_name or applicant.username if applicant else "system"
     applicant_id = applicant.id if applicant else None
@@ -1146,7 +1187,7 @@ def remind_approval(db: Session, approval_id: int, message: str | None = None, a
         operator_id=applicant_id,
         target_type="approval",
         target_id=approval_id,
-        detail=f"第{approval.reminder_count}次催办，节点：第{approval.current_level}级节点",
+        detail=f"第{node_reminder_count}次催办（当前节点），全局第{approval.reminder_count}次，节点：第{approval.current_level}级节点",
     )
     db.add(op_log)
 
@@ -1159,6 +1200,7 @@ def _trigger_escalation_by_reminder(
     db: Session,
     approval: Approval,
     current_record: ApprovalNodeRecord,
+    node_reminder_count: int,
 ) -> None:
     now = datetime.now()
     asset = db.query(Asset).filter(Asset.id == approval.asset_id).first()
@@ -1168,7 +1210,7 @@ def _trigger_escalation_by_reminder(
     current_record.status = ApprovalStatus.ESCALATED
     current_record.is_escalated = True
     current_record.acted_at = now
-    current_record.opinion = f"催办{approval.reminder_count}次未响应，自动升级"
+    current_record.opinion = f"催办{node_reminder_count}次未响应，自动升级"
 
     should_reject = False
     reason_for_reject = ""
@@ -1195,7 +1237,7 @@ def _trigger_escalation_by_reminder(
             action="催办超时升级",
             operator="系统",
             operator_id=None,
-            detail=f"第{current_record.level}/{approval.total_levels}级审批催办{approval.reminder_count}次未响应，自动升级到第{current_record.level + 1}级",
+            detail=f"第{current_record.level}/{approval.total_levels}级审批催办{node_reminder_count}次未响应，自动升级到第{current_record.level + 1}级",
         )
         db.add(log)
 
@@ -1203,14 +1245,14 @@ def _trigger_escalation_by_reminder(
             module="approval",
             action="reminder_escalate",
             operator="系统",
-            detail=f"审批单#{approval.id}第{current_record.level}级催办{approval.reminder_count}次未响应，升级到第{current_record.level + 1}级",
+            detail=f"审批单#{approval.id}第{current_record.level}级催办{node_reminder_count}次未响应，升级到第{current_record.level + 1}级",
         )
         db.add(op_log)
     else:
         if should_reject:
             final_reason = reason_for_reject
         else:
-            final_reason = f"最高级审批催办{approval.reminder_count}次未响应，自动驳回"
+            final_reason = f"最高级审批催办{node_reminder_count}次未响应，自动驳回"
         approval.status = ApprovalStatus.REJECTED
         approval.approver = "系统"
         approval.approval_opinion = final_reason
