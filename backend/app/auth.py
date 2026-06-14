@@ -21,6 +21,13 @@ if not SECRET_KEY:
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
 
+MUST_CHANGE_PASSWORD_WHITELIST = {
+    "/api/health",
+    "/api/auth/login",
+    "/api/auth/register",
+    "/api/auth/change-password",
+}
+
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=False)
 
 
@@ -105,7 +112,7 @@ def get_current_user(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="账号已被禁用，请联系管理员",
         )
-    if user.must_change_password and not getattr(request.state, "is_chpwd_whitelist", False):
+    if user.must_change_password and request.url.path not in MUST_CHANGE_PASSWORD_WHITELIST:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="首次登录必须修改密码，请先调用 /api/auth/change-password 接口修改密码",
@@ -118,6 +125,15 @@ def get_optional_current_user(
     token: str | None = Depends(oauth2_scheme),
     db: Session = Depends(get_db),
 ) -> User | None:
+    """可选用户认证。
+
+    返回值说明:
+      - None: 未提供 token 或 token 无效（签名错误、过期、解析失败等）
+      - User: 认证成功且用户处于可使用状态
+      - HTTPException(403): token 有效但用户必须修改密码
+
+    调用方应通过 `if user is None` 判断未登录场景，通过捕获 403 异常处理需改密场景。
+    """
     if token is None:
         return None
     try:
@@ -132,7 +148,7 @@ def get_optional_current_user(
     user = db.query(User).filter(User.id == token_data.user_id).first()
     if user is None or not user.is_active:
         return None
-    if user.must_change_password and not getattr(request.state, "is_chpwd_whitelist", False):
+    if user.must_change_password and request.url.path not in MUST_CHANGE_PASSWORD_WHITELIST:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="首次登录必须修改密码，请先调用 /api/auth/change-password 接口修改密码",

@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from app.database import engine, Base, SessionLocal
@@ -19,20 +19,6 @@ from app.models import (
     SUPER_ADMIN_USER,
 )
 from app.auth import get_password_hash
-
-MUST_CHANGE_PASSWORD_WHITELIST = {
-    "/api/health",
-    "/api/auth/login",
-    "/api/auth/register",
-    "/api/auth/change-password",
-}
-
-
-async def must_change_password_middleware(request: Request, call_next):
-    request.state.is_chpwd_whitelist = (
-        request.url.path in MUST_CHANGE_PASSWORD_WHITELIST
-    )
-    return await call_next(request)
 
 
 def _init_rbac_data():
@@ -117,8 +103,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-app.middleware("http")(must_change_password_middleware)
 
 app.include_router(auth_router.router)
 app.include_router(users_router.router)
