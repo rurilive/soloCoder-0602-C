@@ -615,6 +615,7 @@ def create_approval(db: Session, asset_id: int, data: ApprovalCreate, applicant:
                     chain_node_id=node.id,
                     chain_node_approver_id=approver.id,
                     level=record_level,
+                    chain_node_level=node.level,
                     approver_role=approver.approver_role,
                     approver_name=approver.approver_name,
                     status=ApprovalStatus.PENDING,
@@ -775,6 +776,20 @@ def _set_next_level_timeout(db: Session, approval: Approval, context: str = "unk
         record.timeout_at = new_timeout
 
 
+def _get_next_record_level(db: Session, approval_id: int, current_level: int) -> int | None:
+    all_levels = [
+        r[0] for r in db.query(ApprovalNodeRecord.level)
+        .filter(ApprovalNodeRecord.approval_id == approval_id)
+        .distinct()
+        .order_by(ApprovalNodeRecord.level.asc())
+        .all()
+    ]
+    idx = all_levels.index(current_level) if current_level in all_levels else -1
+    if idx < 0 or idx >= len(all_levels) - 1:
+        return None
+    return all_levels[idx + 1]
+
+
 def _check_proxy_conflict_for_countersign(
     db: Session,
     approver: User,
@@ -910,9 +925,9 @@ def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approv
                     r.acted_at = now
             level_complete = True
 
-    next_level = approval.current_level + 1
+    next_level = _get_next_record_level(db, approval_id, approval.current_level)
 
-    if level_complete and next_level <= approval.total_levels:
+    if level_complete and next_level is not None:
         approval.current_level = next_level
         _set_next_level_timeout(db, approval, "approve_approval")
 

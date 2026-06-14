@@ -274,6 +274,49 @@ def _migrate_add_countersign_columns():
         db.close()
 
 
+def _migrate_add_conditional_branch_columns():
+    db: Session = SessionLocal()
+    try:
+        from sqlalchemy import inspect, text
+        insp = inspect(engine)
+
+        if not insp.has_table("approval_chain_conditions"):
+            print("[数据迁移] approval_chain_conditions 表将由 SQLAlchemy 自动创建")
+        if not insp.has_table("approval_chain_condition_rules"):
+            print("[数据迁移] approval_chain_condition_rules 表将由 SQLAlchemy 自动创建")
+
+        if insp.has_table("approval_chain_nodes"):
+            chain_node_cols = {c["name"] for c in insp.get_columns("approval_chain_nodes")}
+            if "default_next_level" not in chain_node_cols:
+                db.execute(text("ALTER TABLE approval_chain_nodes ADD COLUMN default_next_level INTEGER"))
+                db.commit()
+                print("[数据迁移] approval_chain_nodes 新增 default_next_level 列")
+
+        if insp.has_table("approval_node_records"):
+            node_record_cols = {c["name"] for c in insp.get_columns("approval_node_records")}
+            if "chain_node_level" not in node_record_cols:
+                db.execute(text("ALTER TABLE approval_node_records ADD COLUMN chain_node_level INTEGER NOT NULL DEFAULT 0"))
+                db.commit()
+                print("[数据迁移] approval_node_records 新增 chain_node_level 列")
+
+                db.execute(text("""
+                    UPDATE approval_node_records
+                    SET chain_node_level = (
+                        SELECT level FROM approval_chain_nodes
+                        WHERE approval_chain_nodes.id = approval_node_records.chain_node_id
+                    )
+                    WHERE chain_node_level = 0
+                """))
+                db.commit()
+                print("[数据迁移] 已回填 approval_node_records.chain_node_level 历史数据")
+
+    except Exception as e:
+        db.rollback()
+        print(f"[数据迁移] 条件分支功能迁移失败: {e}")
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
@@ -282,6 +325,7 @@ async def lifespan(app: FastAPI):
     _migrate_add_timeout_proxy_columns()
     _migrate_add_withdraw_reminder_columns()
     _migrate_add_countersign_columns()
+    _migrate_add_conditional_branch_columns()
     task = asyncio.create_task(_background_timeout_checker())
     yield
     task.cancel()

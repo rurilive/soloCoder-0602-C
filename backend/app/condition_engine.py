@@ -160,60 +160,70 @@ def detect_cycle(nodes: list[ApprovalChainNode]) -> list[int] | None:
 
     WHITE, GRAY, BLACK = 0, 1, 2
     color: dict[int, int] = {level: WHITE for level in all_levels}
-    parent: dict[int, int | None] = {level: None for level in all_levels}
 
-    def dfs(start_level: int) -> list[int] | None:
-        stack: list[tuple[int, bool]] = [(start_level, False)]
-        cycle_path: list[int] = []
+    def _get_targets(level: int) -> list[int]:
+        node = level_map.get(level)
+        if not node:
+            return []
+        targets: list[int] = []
+        for cond in node.conditions:
+            if cond.target_level in all_levels:
+                targets.append(cond.target_level)
+        if node.default_next_level is not None and node.default_next_level in all_levels:
+            targets.append(node.default_next_level)
+        linear_next = level + 1
+        if linear_next in all_levels:
+            targets.append(linear_next)
+        seen = set()
+        unique: list[int] = []
+        for t in targets:
+            if t not in seen:
+                seen.add(t)
+                unique.append(t)
+        return unique
+
+    def dfs_iterative(start: int) -> list[int] | None:
+        stack: list[tuple[int, list[int], int]] = []
+        path: list[int] = []
+        stack.append((start, _get_targets(start), 0))
+        if color[start] == WHITE:
+            color[start] = GRAY
+            path.append(start)
+
         while stack:
-            level, processed = stack.pop()
-            if processed:
-                color[level] = BLACK
-                if cycle_path and cycle_path[-1] == level:
-                    cycle_path.pop()
-                continue
-            if color[level] == BLACK:
-                continue
-            if color[level] == GRAY:
-                cycle = [level]
-                cur = parent[level]
-                while cur is not None and cur != level:
-                    cycle.append(cur)
-                    cur = parent[cur]
-                cycle.append(level)
-                cycle.reverse()
-                return cycle
-            color[level] = GRAY
-            cycle_path.append(level)
-            stack.append((level, True))
+            node_level, children, child_idx = stack[-1]
 
-            node = level_map.get(level)
-            if not node:
+            if child_idx >= len(children):
+                stack.pop()
+                color[node_level] = BLACK
+                if path and path[-1] == node_level:
+                    path.pop()
                 continue
 
-            targets: list[int] = []
-            for cond in node.conditions:
-                if cond.target_level in all_levels:
-                    targets.append(cond.target_level)
-            if node.default_next_level is not None and node.default_next_level in all_levels:
-                targets.append(node.default_next_level)
-            linear_next = level + 1
-            if linear_next in all_levels:
-                targets.append(linear_next)
+            child = children[child_idx]
+            stack[-1] = (node_level, children, child_idx + 1)
 
-            seen_targets = set()
-            for t in reversed(targets):
-                if t in seen_targets:
+            if color[child] == GRAY:
+                try:
+                    idx = path.index(child)
+                    cycle = path[idx:] + [child]
+                    return cycle
+                except ValueError:
                     continue
-                seen_targets.add(t)
-                if color[t] == WHITE:
-                    parent[t] = level
-                stack.append((t, False))
+
+            if color[child] == BLACK:
+                continue
+
+            color[child] = GRAY
+            path.append(child)
+            stack.append((child, _get_targets(child), 0))
+
         return None
 
     for level in sorted(all_levels):
         if color[level] == WHITE:
-            cycle = dfs(level)
+            cycle = dfs_iterative(level)
             if cycle:
                 return cycle
+
     return None

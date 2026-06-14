@@ -106,6 +106,22 @@ function ChainTimeline({ approval }) {
     .map(Number)
     .sort((a, b) => a - b)
 
+  const getChainNodeLevel = (level) => {
+    const recs = levelGroups[level]
+    if (!recs || recs.length === 0) return 0
+    return recs[0].chain_node_level || 0
+  }
+
+  const hasConditionalJump = (levelIdx) => {
+    if (levelIdx === 0) return false
+    const prevLevel = levels[levelIdx - 1]
+    const currLevel = levels[levelIdx]
+    const prevChainLevel = getChainNodeLevel(prevLevel)
+    const currChainLevel = getChainNodeLevel(currLevel)
+    if (prevChainLevel === 0 || currChainLevel === 0) return false
+    return currChainLevel !== prevChainLevel + 1
+  }
+
   return (
     <div className="card">
       <h3 style={{ marginBottom: 16 }}>
@@ -120,13 +136,49 @@ function ChainTimeline({ approval }) {
           const state = getLevelState(records, approval)
           const isMulti = records.length > 1
           const role = records[0]?.approver_role
+          const chainNodeLevel = getChainNodeLevel(level)
+          const isJump = hasConditionalJump(levelIdx)
+          const prevChainLevel = levelIdx > 0 ? getChainNodeLevel(levels[levelIdx - 1]) : 0
           return (
             <div key={level} className={`approval-chain-node chain-node-${state}`}>
+              {isJump && (
+                <div
+                  className="chain-jump-indicator"
+                  style={{
+                    position: 'absolute',
+                    left: 14,
+                    top: -2,
+                    transform: 'translateY(-100%)',
+                    fontSize: 11,
+                    color: 'var(--warning)',
+                    fontWeight: 500,
+                    background: 'rgba(255, 193, 7, 0.12)',
+                    padding: '3px 10px',
+                    borderRadius: 4,
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  ↷ 条件跳转：L{prevChainLevel} → L{chainNodeLevel}
+                </div>
+              )}
               {levelIdx < levels.length - 1 && <div className="chain-connector" />}
               <NodeIcon state={state} />
               <div className="chain-node-content">
                 <div className="chain-node-title">
                   <span>第 {level} 级 - {role}</span>
+                  {chainNodeLevel > 0 && chainNodeLevel !== level && (
+                    <span
+                      className="status-badge"
+                      style={{
+                        marginLeft: 6,
+                        fontSize: 11,
+                        background: 'var(--bg-secondary)',
+                        color: 'var(--text-secondary)',
+                      }}
+                    >
+                      原节点 L{chainNodeLevel}
+                    </span>
+                  )}
                   {isMulti && (
                     <span className="status-badge status-pending" style={{ marginLeft: 6, fontSize: 11 }}>
                       {records.length} 人并行

@@ -176,6 +176,7 @@ class ApprovalNodeRecordResponse(BaseModel):
     chain_node_id: int
     chain_node_approver_id: int | None = None
     level: int
+    chain_node_level: int = 0
     approver_role: str
     approver_name: str
     status: ApprovalStatus
