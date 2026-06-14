@@ -4,10 +4,9 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.auth import (
     get_current_user,
-    get_user_roles,
-    get_user_permission_list,
     get_password_hash,
     require_permissions,
+    build_user_response,
 )
 from app.models import User, Role, UserRole
 from app.schemas import (
@@ -17,54 +16,9 @@ from app.schemas import (
     UserResponse,
     UserListResponse,
     UserProfileResponse,
-    RoleBrief,
 )
 
 router = APIRouter(prefix="/api/users", tags=["users"])
-
-
-def _build_user_response(db: Session, user: User) -> UserResponse:
-    user_data = {
-        "id": user.id,
-        "username": user.username,
-        "email": user.email,
-        "real_name": user.real_name,
-        "is_active": user.is_active,
-        "avatar": user.avatar,
-        "department": user.department,
-        "position": user.position,
-        "phone": user.phone,
-        "created_at": user.created_at,
-        "updated_at": user.updated_at,
-    }
-    roles = get_user_roles(db, user.id)
-    permissions = get_user_permission_list(db, user.id)
-    response = UserResponse(**user_data)
-    response.roles = [RoleBrief.model_validate(r) for r in roles]
-    response.permissions = permissions
-    return response
-
-
-def _build_profile_response(db: Session, user: User) -> UserProfileResponse:
-    user_data = {
-        "id": user.id,
-        "username": user.username,
-        "email": user.email,
-        "real_name": user.real_name,
-        "is_active": user.is_active,
-        "avatar": user.avatar,
-        "department": user.department,
-        "position": user.position,
-        "phone": user.phone,
-        "created_at": user.created_at,
-        "updated_at": user.updated_at,
-    }
-    roles = get_user_roles(db, user.id)
-    permissions = get_user_permission_list(db, user.id)
-    response = UserProfileResponse(**user_data)
-    response.roles = [RoleBrief.model_validate(r) for r in roles]
-    response.permissions = permissions
-    return response
 
 
 @router.get("", response_model=UserListResponse)
@@ -95,7 +49,7 @@ def list_users(
         .limit(page_size)
         .all()
     )
-    result = [_build_user_response(db, u) for u in items]
+    result = [build_user_response(db, u) for u in items]
     return UserListResponse(total=total, items=result)
 
 
@@ -108,7 +62,7 @@ def get_user(
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")
-    return _build_profile_response(db, user)
+    return build_user_response(db, user)
 
 
 @router.post("", response_model=UserProfileResponse, status_code=status.HTTP_201_CREATED)
@@ -149,7 +103,7 @@ def create_user(
 
     db.commit()
     db.refresh(user)
-    return _build_profile_response(db, user)
+    return build_user_response(db, user)
 
 
 @router.put("/{user_id}", response_model=UserProfileResponse)
@@ -174,7 +128,7 @@ def update_user(
 
     db.commit()
     db.refresh(user)
-    return _build_profile_response(db, user)
+    return build_user_response(db, user)
 
 
 @router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -226,4 +180,4 @@ def assign_roles(
 
     db.commit()
     db.refresh(user)
-    return _build_profile_response(db, user)
+    return build_user_response(db, user)

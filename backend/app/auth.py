@@ -1,8 +1,9 @@
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 import bcrypt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from sqlalchemy.orm import Session
@@ -11,7 +12,12 @@ from app.database import get_db
 from app.models import User, Role, UserRole, RolePermission, Permission
 from app.schemas import TokenData
 
-SECRET_KEY = "asset-management-secret-key-change-in-production-2024"
+SECRET_KEY = os.environ.get("ASSET_JWT_SECRET")
+if not SECRET_KEY:
+    raise RuntimeError(
+        "环境变量 ASSET_JWT_SECRET 未设置！请在启动服务前设置该变量，例如：\n"
+        "  export ASSET_JWT_SECRET='your-strong-secret-key-here'"
+    )
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
 
@@ -71,6 +77,7 @@ def get_user_role_codes(db: Session, user_id: int) -> list[str]:
 
 
 def get_current_user(
+    request: Request,
     token: str | None = Depends(oauth2_scheme),
     db: Session = Depends(get_db),
 ) -> User:
@@ -98,6 +105,13 @@ def get_current_user(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="账号已被禁用，请联系管理员",
         )
+    if user.must_change_password:
+        path = request.url.path
+        if not (path == "/api/auth/change-password" or path.endswith("/auth/change-password")):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="首次登录必须修改密码，请先调用 /api/auth/change-password 接口修改密码",
+            )
     return user
 
 
@@ -177,3 +191,28 @@ def check_user_permission(db: Session, user_id: int, permission: str) -> bool:
 
 def get_user_permission_list(db: Session, user_id: int) -> list[str]:
     return sorted(list(_get_user_permissions(db, user_id)))
+
+
+def build_user_response(db: Session, user: User):
+    from app.schemas import UserResponse, RoleBrief
+
+    user_data = {
+        "id": user.id,
+        "username": user.username,
+        "email": user.email,
+        "real_name": user.real_name,
+        "is_active": user.is_active,
+        "must_change_password": user.must_change_password,
+        "avatar": user.avatar,
+        "department": user.department,
+        "position": user.position,
+        "phone": user.phone,
+        "created_at": user.created_at,
+        "updated_at": user.updated_at,
+    }
+    roles = get_user_roles(db, user.id)
+    permissions = get_user_permission_list(db, user.id)
+    response = UserResponse(**user_data)
+    response.roles = [RoleBrief.model_validate(r) for r in roles]
+    response.permissions = permissions
+    return response

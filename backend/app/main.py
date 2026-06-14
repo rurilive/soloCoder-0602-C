@@ -65,6 +65,7 @@ def _init_rbac_data():
                 department=SUPER_ADMIN_USER["department"],
                 position=SUPER_ADMIN_USER["position"],
                 is_active=True,
+                must_change_password=True,
             )
             db.add(user)
             db.flush()

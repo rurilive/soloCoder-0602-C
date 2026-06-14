@@ -188,6 +188,7 @@ class User(Base):
     real_name: Mapped[str] = mapped_column(String(64), nullable=True)
     hashed_password: Mapped[str] = mapped_column(String(256), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    must_change_password: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     avatar: Mapped[str | None] = mapped_column(String(256), nullable=True)
     department: Mapped[str | None] = mapped_column(String(128), nullable=True)
     position: Mapped[str | None] = mapped_column(String(128), nullable=True)

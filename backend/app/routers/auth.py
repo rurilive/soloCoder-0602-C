@@ -7,8 +7,7 @@ from app.auth import (
     get_password_hash,
     verify_password,
     get_current_user,
-    get_user_roles,
-    get_user_permission_list,
+    build_user_response,
 )
 from app.models import User, UserRole, Role
 from app.schemas import (
@@ -17,32 +16,9 @@ from app.schemas import (
     RegisterRequest,
     PasswordChange,
     UserProfileResponse,
-    RoleBrief,
 )
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
-
-
-def _build_profile_response(db: Session, user: User) -> UserProfileResponse:
-    user_data = {
-        "id": user.id,
-        "username": user.username,
-        "email": user.email,
-        "real_name": user.real_name,
-        "is_active": user.is_active,
-        "avatar": user.avatar,
-        "department": user.department,
-        "position": user.position,
-        "phone": user.phone,
-        "created_at": user.created_at,
-        "updated_at": user.updated_at,
-    }
-    roles = get_user_roles(db, user.id)
-    permissions = get_user_permission_list(db, user.id)
-    response = UserProfileResponse(**user_data)
-    response.roles = [RoleBrief.model_validate(r) for r in roles]
-    response.permissions = permissions
-    return response
 
 
 @router.post("/register", response_model=UserProfileResponse, status_code=status.HTTP_201_CREATED)
@@ -74,7 +50,7 @@ def register(user_data: RegisterRequest, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(user)
 
-    return _build_profile_response(db, user)
+    return build_user_response(db, user)
 
 
 @router.post("/login", response_model=Token)
@@ -103,7 +79,7 @@ def get_profile(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    return _build_profile_response(db, current_user)
+    return build_user_response(db, current_user)
 
 
 @router.post("/change-password", status_code=status.HTTP_200_OK)
@@ -118,5 +94,7 @@ def change_password(
             detail="原密码错误",
         )
     current_user.hashed_password = get_password_hash(data.new_password)
+    if current_user.must_change_password:
+        current_user.must_change_password = False
     db.commit()
     return {"message": "密码修改成功"}

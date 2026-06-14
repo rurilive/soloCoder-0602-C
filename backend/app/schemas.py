@@ -354,6 +354,7 @@ class UserResponse(BaseModel):
     email: str
     real_name: str | None
     is_active: bool
+    must_change_password: bool = False
     avatar: str | None
     department: str | None
     position: str | None
@@ -371,22 +372,7 @@ class UserListResponse(BaseModel):
     items: list[UserResponse]
 
 
-class UserProfileResponse(BaseModel):
-    id: int
-    username: str
-    email: str
-    real_name: str | None
-    is_active: bool
-    avatar: str | None
-    department: str | None
-    position: str | None
-    phone: str | None
-    roles: list[RoleBrief] = []
-    permissions: list[str] = []
-    created_at: datetime
-    updated_at: datetime
-
-    model_config = {"from_attributes": True}
+UserProfileResponse = UserResponse
 
 
 class ModulePermissions(BaseModel):
