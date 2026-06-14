@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 import bcrypt
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from sqlalchemy.orm import Session
@@ -77,7 +77,6 @@ def get_user_role_codes(db: Session, user_id: int) -> list[str]:
 
 
 def get_current_user(
-    request: Request,
     token: str | None = Depends(oauth2_scheme),
     db: Session = Depends(get_db),
 ) -> User:
@@ -105,13 +104,6 @@ def get_current_user(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="账号已被禁用，请联系管理员",
         )
-    if user.must_change_password:
-        path = request.url.path
-        if not (path == "/api/auth/change-password" or path.endswith("/auth/change-password")):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="首次登录必须修改密码，请先调用 /api/auth/change-password 接口修改密码",
-            )
     return user
 
 
@@ -131,7 +123,7 @@ def get_optional_current_user(
         return None
 
     user = db.query(User).filter(User.id == token_data.user_id).first()
-    if user is None or not user.is_active:
+    if user is None or not user.is_active or user.must_change_password:
         return None
     return user
 
