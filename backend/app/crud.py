@@ -9,8 +9,9 @@ from app.models import (
     Asset, AssetLog, AssetStatus, AssetCategory, ImportLog,
     Approval, ApprovalType, ApprovalStatus,
     ApprovalChain, ApprovalChainNode, ApprovalNodeRecord,
-    ApprovalProxy, OperationLog,
+    ApprovalProxy, ApprovalReminder, OperationLog,
     User, Role, UserRole,
+    Notification, NotificationType,
 )
 
 logger = logging.getLogger(__name__)
@@ -936,6 +937,319 @@ def reject_approval(db: Session, approval_id: int, data: ApprovalAction, approve
     return approval
 
 
+def withdraw_approval(db: Session, approval_id: int, reason: str | None = None, applicant: User | None = None) -> Approval:
+    from app.auth import get_user_display_name
+
+    approval = get_approval(db, approval_id)
+    if approval.status != ApprovalStatus.PENDING:
+        raise HTTPException(status_code=400, detail="审批单已处理，不可撤回")
+
+    if applicant:
+        applicant_name = get_user_display_name(applicant)
+        if approval.applicant != applicant_name:
+            from app.auth import is_admin_user
+            if not is_admin_user(db, applicant.id):
+                raise HTTPException(status_code=403, detail="只有申请人或管理员可以撤回审批")
+
+    asset = get_asset(db, approval.asset_id)
+    if asset.status != AssetStatus.PENDING_APPROVAL:
+        raise HTTPException(status_code=400, detail="资产状态异常，无法撤回")
+
+    now = datetime.now()
+
+    approval.status = ApprovalStatus.WITHDRAWN
+    approval.approval_opinion = reason
+
+    node_records = (
+        db.query(ApprovalNodeRecord)
+        .filter(ApprovalNodeRecord.approval_id == approval_id)
+        .all()
+    )
+    for record in node_records:
+        if record.status == ApprovalStatus.PENDING:
+            record.status = ApprovalStatus.WITHDRAWN
+            record.acted_at = now
+            record.opinion = "审批已撤回"
+        elif record.status in (ApprovalStatus.APPROVED, ApprovalStatus.ESCALATED):
+            record.status = ApprovalStatus.WITHDRAWN
+            if not record.opinion:
+                record.opinion = "审批已撤回"
+
+    asset.status = approval.previous_status
+
+    applicant_display = applicant.real_name or applicant.username if applicant else approval.applicant
+    applicant_id = applicant.id if applicant else None
+
+    action_type = "领用" if approval.approval_type == ApprovalType.ALLOCATE else "报废"
+    log = AssetLog(
+        asset_id=asset.id,
+        action=f"{action_type}审批撤回",
+        operator=applicant_display,
+        operator_id=applicant_id,
+        detail=reason or f"申请人撤回{action_type}审批申请",
+    )
+    db.add(log)
+
+    op_log = OperationLog(
+        module="approval",
+        action="withdraw",
+        operator=applicant_display,
+        operator_id=applicant_id,
+        target_type="approval",
+        target_id=approval_id,
+        detail=reason or "撤回审批申请",
+    )
+    db.add(op_log)
+
+    db.commit()
+    db.refresh(approval)
+    return approval
+
+
+def get_approval_reminders(db: Session, approval_id: int) -> list[ApprovalReminder]:
+    return (
+        db.query(ApprovalReminder)
+        .filter(ApprovalReminder.approval_id == approval_id)
+        .order_by(ApprovalReminder.created_at.desc())
+        .all()
+    )
+
+
+def _find_users_by_role(db: Session, role_code: str) -> list[User]:
+    from app.models import Role, UserRole
+
+    role = db.query(Role).filter(Role.code == role_code).first()
+    if not role:
+        return []
+    user_roles = db.query(UserRole).filter(UserRole.role_id == role.id).all()
+    user_ids = [ur.user_id for ur in user_roles]
+    if not user_ids:
+        return []
+    return db.query(User).filter(User.id.in_(user_ids), User.is_active == True).all()
+
+
+def _create_notification(
+    db: Session,
+    user_id: int,
+    notification_type: NotificationType,
+    title: str,
+    content: str,
+    related_id: int | None = None,
+    related_type: str | None = None,
+) -> Notification:
+    notification = Notification(
+        user_id=user_id,
+        type=notification_type,
+        title=title,
+        content=content,
+        related_id=related_id,
+        related_type=related_type,
+    )
+    db.add(notification)
+    return notification
+
+
+def remind_approval(db: Session, approval_id: int, message: str | None = None, applicant: User | None = None) -> Approval:
+    from app.auth import get_user_display_name
+
+    approval = get_approval(db, approval_id)
+    if approval.status != ApprovalStatus.PENDING:
+        raise HTTPException(status_code=400, detail="审批单已处理，不可催办")
+
+    if applicant:
+        applicant_name = get_user_display_name(applicant)
+        if approval.applicant != applicant_name:
+            from app.auth import is_admin_user
+            if not is_admin_user(db, applicant.id):
+                raise HTTPException(status_code=403, detail="只有申请人或管理员可以催办审批")
+
+    now = datetime.now()
+
+    current_record = (
+        db.query(ApprovalNodeRecord)
+        .filter(
+            ApprovalNodeRecord.approval_id == approval_id,
+            ApprovalNodeRecord.level == approval.current_level,
+        )
+        .first()
+    )
+    if not current_record:
+        raise HTTPException(status_code=400, detail="当前审批节点不存在")
+    if current_record.status != ApprovalStatus.PENDING:
+        raise HTTPException(status_code=400, detail="当前节点已处理，不可催办")
+
+    last_reminder = (
+        db.query(ApprovalReminder)
+        .filter(
+            ApprovalReminder.approval_id == approval_id,
+            ApprovalReminder.level == approval.current_level,
+        )
+        .order_by(ApprovalReminder.created_at.desc())
+        .first()
+    )
+    if last_reminder and (now - last_reminder.created_at) < timedelta(hours=24):
+        remaining = timedelta(hours=24) - (now - last_reminder.created_at)
+        hours = int(remaining.total_seconds() // 3600)
+        minutes = int((remaining.total_seconds() % 3600) // 60)
+        raise HTTPException(
+            status_code=400,
+            detail=f"同一节点24小时内只能催办一次，还需等待 {hours}小时{minutes}分钟 后可再次催办",
+        )
+
+    reminder_by = applicant.real_name or applicant.username if applicant else "system"
+    reminder_by_id = applicant.id if applicant else None
+
+    reminder = ApprovalReminder(
+        approval_id=approval_id,
+        level=approval.current_level,
+        reminder_by=reminder_by,
+        reminder_by_id=reminder_by_id,
+        message=message,
+    )
+    db.add(reminder)
+
+    approval.reminder_count = approval.reminder_count + 1
+    approval.last_reminder_at = now
+
+    approver_users = _find_users_by_role(db, current_record.approver_role)
+
+    action_type = "领用" if approval.approval_type == ApprovalType.ALLOCATE else "报废"
+    notification_title = f"审批催办：{action_type}申请"
+    notification_content = (
+        f"申请人 {approval.applicant} 对 {action_type}审批单（#{approval.id}）发起了催办，"
+        f"请尽快处理。"
+    )
+    if message:
+        notification_content += f"\n催办留言：{message}"
+
+    for user in approver_users:
+        _create_notification(
+            db,
+            user_id=user.id,
+            notification_type=NotificationType.APPROVAL_REMINDER,
+            title=notification_title,
+            content=notification_content,
+            related_id=approval_id,
+            related_type="approval",
+        )
+
+    if approval.reminder_count >= 3:
+        _trigger_escalation_by_reminder(db, approval, current_record)
+
+    applicant_display = applicant.real_name or applicant.username if applicant else "system"
+    applicant_id = applicant.id if applicant else None
+
+    op_log = OperationLog(
+        module="approval",
+        action="remind",
+        operator=applicant_display,
+        operator_id=applicant_id,
+        target_type="approval",
+        target_id=approval_id,
+        detail=f"第{approval.reminder_count}次催办，节点：第{approval.current_level}级节点",
+    )
+    db.add(op_log)
+
+    db.commit()
+    db.refresh(approval)
+    return approval
+
+
+def _trigger_escalation_by_reminder(
+    db: Session,
+    approval: Approval,
+    current_record: ApprovalNodeRecord,
+) -> None:
+    now = datetime.now()
+    asset = db.query(Asset).filter(Asset.id == approval.asset_id).first()
+    if not asset:
+        return
+
+    current_record.status = ApprovalStatus.ESCALATED
+    current_record.is_escalated = True
+    current_record.acted_at = now
+    current_record.opinion = f"催办{approval.reminder_count}次未响应，自动升级"
+
+    should_reject = False
+    reason_for_reject = ""
+
+    if current_record.level < approval.total_levels:
+        next_record = (
+            db.query(ApprovalNodeRecord)
+            .filter(
+                ApprovalNodeRecord.approval_id == approval.id,
+                ApprovalNodeRecord.level == current_record.level + 1,
+            )
+            .first()
+        )
+        if next_record and not _role_is_truly_higher(current_record.approver_role, next_record.approver_role):
+            should_reject = True
+            reason_for_reject = f"下一级角色（{next_record.approver_role}）权限不高于当前级（{current_record.approver_role}），避免升级死循环，自动驳回"
+
+    if not should_reject and current_record.level < approval.total_levels:
+        approval.current_level = current_record.level + 1
+        _set_next_level_timeout(db, approval, "remind_escalation")
+
+        log = AssetLog(
+            asset_id=asset.id,
+            action="催办超时升级",
+            operator="系统",
+            operator_id=None,
+            detail=f"第{current_record.level}/{approval.total_levels}级审批催办{approval.reminder_count}次未响应，自动升级到第{current_record.level + 1}级",
+        )
+        db.add(log)
+
+        op_log = OperationLog(
+            module="approval",
+            action="reminder_escalate",
+            operator="系统",
+            detail=f"审批单#{approval.id}第{current_record.level}级催办{approval.reminder_count}次未响应，升级到第{current_record.level + 1}级",
+        )
+        db.add(op_log)
+    else:
+        if should_reject:
+            final_reason = reason_for_reject
+        else:
+            final_reason = f"最高级审批催办{approval.reminder_count}次未响应，自动驳回"
+        approval.status = ApprovalStatus.REJECTED
+        approval.approver = "系统"
+        approval.approval_opinion = final_reason
+
+        asset.status = approval.previous_status
+
+        remaining_records = (
+            db.query(ApprovalNodeRecord)
+            .filter(
+                ApprovalNodeRecord.approval_id == approval.id,
+                ApprovalNodeRecord.level > current_record.level,
+                ApprovalNodeRecord.status == ApprovalStatus.PENDING,
+            )
+            .all()
+        )
+        for r in remaining_records:
+            r.status = ApprovalStatus.REJECTED
+
+        log_detail = (
+            f"（第{current_record.level}/{approval.total_levels}级）{final_reason}，资产状态恢复为{approval.previous_status.value}"
+        )
+        log = AssetLog(
+            asset_id=asset.id,
+            action="催办超时驳回",
+            operator="系统",
+            operator_id=None,
+            detail=log_detail,
+        )
+        db.add(log)
+
+        op_log = OperationLog(
+            module="approval",
+            action="reminder_reject",
+            operator="系统",
+            detail=f"审批单#{approval.id}{final_reason}",
+        )
+        db.add(op_log)
+
+
 def get_my_pending_approvals(
     db: Session,
     current_user: User,
@@ -1541,3 +1855,71 @@ def cancel_approval_proxy(db: Session, proxy_id: int, current_user: User) -> App
     db.commit()
     db.refresh(proxy)
     return proxy
+
+
+def get_user_notifications(
+    db: Session,
+    user_id: int,
+    is_read: bool | None = None,
+    page: int = 1,
+    page_size: int = 20,
+) -> tuple[list[Notification], int, int]:
+    query = db.query(Notification).filter(Notification.user_id == user_id)
+
+    if is_read is not None:
+        query = query.filter(Notification.is_read == is_read)
+
+    total = query.count()
+    unread_count = db.query(Notification).filter(
+        Notification.user_id == user_id,
+        Notification.is_read == False,
+    ).count()
+
+    items = (
+        query.order_by(Notification.created_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+    return items, total, unread_count
+
+
+def get_notification(db: Session, notification_id: int, user_id: int) -> Notification:
+    notification = db.query(Notification).filter(Notification.id == notification_id).first()
+    if not notification:
+        raise HTTPException(status_code=404, detail="通知不存在")
+    if notification.user_id != user_id:
+        from app.auth import is_admin_user
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user or not is_admin_user(db, user_id):
+            raise HTTPException(status_code=403, detail="无权查看此通知")
+    return notification
+
+
+def mark_notification_read(db: Session, notification_id: int, user_id: int) -> Notification:
+    notification = get_notification(db, notification_id, user_id)
+    if not notification.is_read:
+        notification.is_read = True
+        notification.read_at = datetime.now()
+        db.commit()
+        db.refresh(notification)
+    return notification
+
+
+def mark_all_notifications_read(db: Session, user_id: int) -> int:
+    notifications = (
+        db.query(Notification)
+        .filter(
+            Notification.user_id == user_id,
+            Notification.is_read == False,
+        )
+        .all()
+    )
+    count = len(notifications)
+    now = datetime.now()
+    for n in notifications:
+        n.is_read = True
+        n.read_at = now
+    if count > 0:
+        db.commit()
+    return count

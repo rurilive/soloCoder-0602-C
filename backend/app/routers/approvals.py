@@ -17,6 +17,8 @@ from app.schemas import (
     ApprovalProxyCreate,
     ApprovalProxyResponse,
     ApprovalProxyListResponse,
+    ApprovalWithdrawRequest,
+    ApprovalRemindRequest,
 )
 from app import crud
 
@@ -308,11 +310,13 @@ def get_approval(
     approval = crud.get_approval(db, approval_id, current_user)
     asset = crud.get_asset(db, approval.asset_id, current_user)
     node_records = crud.get_approval_node_records(db, approval.id)
+    reminders = crud.get_approval_reminders(db, approval.id)
     result = ApprovalDetailResponse.model_validate(approval)
     result.asset_name = asset.name
     result.asset_tag = asset.asset_tag
     result.purchase_price = asset.purchase_price
     result.node_records = node_records
+    result.reminders = reminders
     return result
 
 
@@ -358,6 +362,54 @@ def reject_approval(
         target_type="approval",
         target_id=approval_id,
         detail=f"审批驳回, 意见: {data.opinion or '无'}",
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    return approval
+
+
+@router.post("/{approval_id}/withdraw", response_model=ApprovalResponse)
+def withdraw_approval(
+    request: Request,
+    approval_id: int,
+    data: ApprovalWithdrawRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    crud.get_approval(db, approval_id, current_user)
+    approval = crud.withdraw_approval(db, approval_id, data.reason, current_user)
+    log_operation(
+        db,
+        module="approval",
+        action="withdraw",
+        user=current_user,
+        target_type="approval",
+        target_id=approval_id,
+        detail=f"撤回审批, 原因: {data.reason or '无'}",
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    return approval
+
+
+@router.post("/{approval_id}/remind", response_model=ApprovalResponse)
+def remind_approval(
+    request: Request,
+    approval_id: int,
+    data: ApprovalRemindRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    crud.get_approval(db, approval_id, current_user)
+    approval = crud.remind_approval(db, approval_id, data.message, current_user)
+    log_operation(
+        db,
+        module="approval",
+        action="remind",
+        user=current_user,
+        target_type="approval",
+        target_id=approval_id,
+        detail=f"催办审批, 留言: {data.message or '无'}",
         ip_address=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
     )

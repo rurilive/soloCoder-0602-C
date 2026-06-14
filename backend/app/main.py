@@ -11,6 +11,7 @@ from app.routers import auth as auth_router
 from app.routers import users as users_router
 from app.routers import permissions as permissions_router
 from app.routers import logs as logs_router
+from app.routers import notifications as notifications_router
 from app.models import (
     Permission,
     Role,
@@ -196,12 +197,43 @@ def _migrate_add_timeout_proxy_columns():
         db.close()
 
 
+def _migrate_add_withdraw_reminder_columns():
+    db: Session = SessionLocal()
+    try:
+        from sqlalchemy import inspect, text
+        insp = inspect(engine)
+
+        approval_cols = {c["name"] for c in insp.get_columns("approvals")}
+        if "reminder_count" not in approval_cols:
+            db.execute(text("ALTER TABLE approvals ADD COLUMN reminder_count INTEGER NOT NULL DEFAULT 0"))
+            db.commit()
+            print("[数据迁移] approvals 新增 reminder_count 列")
+
+        if "last_reminder_at" not in approval_cols:
+            db.execute(text("ALTER TABLE approvals ADD COLUMN last_reminder_at DATETIME"))
+            db.commit()
+            print("[数据迁移] approvals 新增 last_reminder_at 列")
+
+        if not insp.has_table("approval_reminders"):
+            print("[数据迁移] approval_reminders 表将由 SQLAlchemy 自动创建")
+
+        if not insp.has_table("notifications"):
+            print("[数据迁移] notifications 表将由 SQLAlchemy 自动创建")
+
+    except Exception as e:
+        db.rollback()
+        print(f"[数据迁移] 撤回/催办迁移失败: {e}")
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
     _init_rbac_data()
     _migrate_purchase_department()
     _migrate_add_timeout_proxy_columns()
+    _migrate_add_withdraw_reminder_columns()
     task = asyncio.create_task(_background_timeout_checker())
     yield
     task.cancel()
@@ -232,6 +264,7 @@ app.include_router(permissions_router.router)
 app.include_router(assets_router.router)
 app.include_router(approvals_router.router)
 app.include_router(logs_router.router)
+app.include_router(notifications_router.router)
 
 
 @app.get("/api/health")

@@ -1,6 +1,6 @@
 from datetime import datetime
 from pydantic import BaseModel, Field, EmailStr
-from app.models import AssetStatus, AssetCategory, ApprovalType, ApprovalStatus
+from app.models import AssetStatus, AssetCategory, ApprovalType, ApprovalStatus, NotificationType
 
 
 class AssetCreate(BaseModel):
@@ -137,6 +137,14 @@ class ApprovalAction(BaseModel):
     opinion: str | None = None
 
 
+class ApprovalWithdrawRequest(BaseModel):
+    reason: str | None = Field(None, max_length=500)
+
+
+class ApprovalRemindRequest(BaseModel):
+    message: str | None = Field(None, max_length=500)
+
+
 class ApprovalResponse(BaseModel):
     id: int
     asset_id: int
@@ -151,6 +159,8 @@ class ApprovalResponse(BaseModel):
     current_level: int
     total_levels: int
     chain_id: int | None
+    reminder_count: int = 0
+    last_reminder_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -176,11 +186,23 @@ class ApprovalNodeRecordResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ApprovalReminderResponse(BaseModel):
+    id: int
+    approval_id: int
+    level: int
+    reminder_by: str
+    message: str | None = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
 class ApprovalDetailResponse(ApprovalResponse):
     asset_name: str | None = None
     asset_tag: str | None = None
     purchase_price: float | None = None
     node_records: list[ApprovalNodeRecordResponse] = []
+    reminders: list[ApprovalReminderResponse] = []
 
 
 class ApprovalListResponse(BaseModel):
@@ -442,3 +464,24 @@ class ApprovalProxyResponse(BaseModel):
 class ApprovalProxyListResponse(BaseModel):
     total: int
     items: list[ApprovalProxyResponse]
+
+
+class NotificationResponse(BaseModel):
+    id: int
+    user_id: int
+    type: NotificationType
+    title: str
+    content: str
+    related_id: int | None = None
+    related_type: str | None = None
+    is_read: bool
+    created_at: datetime
+    read_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class NotificationListResponse(BaseModel):
+    total: int
+    items: list[NotificationResponse]
+    unread_count: int = 0

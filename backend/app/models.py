@@ -23,6 +23,16 @@ class ApprovalStatus(str, enum.Enum):
     APPROVED = "approved"
     REJECTED = "rejected"
     ESCALATED = "escalated"
+    WITHDRAWN = "withdrawn"
+
+
+class NotificationType(str, enum.Enum):
+    APPROVAL_REMINDER = "approval_reminder"
+    APPROVAL_SUBMITTED = "approval_submitted"
+    APPROVAL_APPROVED = "approval_approved"
+    APPROVAL_REJECTED = "approval_rejected"
+    APPROVAL_WITHDRAWN = "approval_withdrawn"
+    SYSTEM = "system"
 
 
 class AssetCategory(str, enum.Enum):
@@ -115,6 +125,8 @@ class Approval(Base):
     current_level: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     total_levels: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     chain_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("approval_chains.id"), nullable=True)
+    reminder_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_reminder_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
 
@@ -131,6 +143,33 @@ class ApprovalProxy(Base):
     reason: Mapped[str | None] = mapped_column(String(256), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+
+
+class ApprovalReminder(Base):
+    __tablename__ = "approval_reminders"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    approval_id: Mapped[int] = mapped_column(Integer, ForeignKey("approvals.id"), nullable=False, index=True)
+    level: Mapped[int] = mapped_column(Integer, nullable=False)
+    reminder_by: Mapped[str] = mapped_column(String(128), nullable=False)
+    reminder_by_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
+
+
+class Notification(Base):
+    __tablename__ = "notifications"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    type: Mapped[NotificationType] = mapped_column(Enum(NotificationType), nullable=False)
+    title: Mapped[str] = mapped_column(String(256), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    related_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    related_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    is_read: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
+    read_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class AssetLog(Base):
