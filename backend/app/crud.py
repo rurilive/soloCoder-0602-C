@@ -1,6 +1,7 @@
 import qrcode
 import io
 import base64
+import logging
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from fastapi import HTTPException
@@ -11,6 +12,8 @@ from app.models import (
     ApprovalProxy, OperationLog,
     User, Role, UserRole,
 )
+
+logger = logging.getLogger(__name__)
 from app.schemas import (
     AssetCreate, AssetUpdate, AssetAllocate, AssetReturn, AssetScrap,
     ImportErrorItem, ApprovalCreate, ApprovalAction,
@@ -694,6 +697,37 @@ def _set_next_level_timeout(db: Session, approval: Approval):
             next_record.timeout_at = datetime.now() + timedelta(minutes=chain_node.timeout_minutes)
 
 
+def _enforce_next_level_timeout(db: Session, approval: Approval, context: str) -> None:
+    _set_next_level_timeout(db, approval)
+    next_record = (
+        db.query(ApprovalNodeRecord)
+        .filter(
+            ApprovalNodeRecord.approval_id == approval.id,
+            ApprovalNodeRecord.level == approval.current_level,
+        )
+        .first()
+    )
+    if not next_record:
+        logger.warning(
+            "[%s] 审批单#%d 下一级节点(level=%d)不存在，无法设置超时",
+            context, approval.id, approval.current_level,
+        )
+        return
+    if next_record.timeout_at is None:
+        chain_node = (
+            db.query(ApprovalChainNode)
+            .filter(ApprovalChainNode.id == next_record.chain_node_id)
+            .first()
+        )
+        if chain_node and chain_node.timeout_minutes is not None:
+            logger.warning(
+                "[%s] 审批单#%d 节点(level=%d, role=%s) timeout_at 仍为None，强制补设超时时间 %d 分钟",
+                context, approval.id, next_record.level,
+                next_record.approver_role, chain_node.timeout_minutes,
+            )
+            next_record.timeout_at = datetime.now() + timedelta(minutes=chain_node.timeout_minutes)
+
+
 def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approver: User | None = None) -> Approval:
     approval = get_approval(db, approval_id)
     if approval.status != ApprovalStatus.PENDING:
@@ -772,7 +806,7 @@ def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approv
 
         if next_level <= approval.total_levels:
             approval.current_level = next_level
-            _set_next_level_timeout(db, approval)
+            _enforce_next_level_timeout(db, approval, "approve_approval")
 
             level_desc = f"第{approval.current_level - 1}/{approval.total_levels}级审批通过"
             proxy_info = f"（代理审批，代理人: {approver_name}，代原审批人: {current_record.proxy_source}）" if current_record.proxy_source else ""
@@ -1328,7 +1362,7 @@ def check_and_process_timeouts(db: Session) -> list[dict]:
 
         if not should_reject and record.level < approval.total_levels:
             approval.current_level = record.level + 1
-            _set_next_level_timeout(db, approval)
+            _enforce_next_level_timeout(db, approval, "check_and_process_timeouts")
 
             log = AssetLog(
                 asset_id=asset.id,
