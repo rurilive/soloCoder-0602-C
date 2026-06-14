@@ -858,11 +858,8 @@ def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approv
             for r in current_level_records:
                 if r.status == ApprovalStatus.PENDING:
                     r.status = ApprovalStatus.APPROVED
-                    r.opinion = "或签模式，其他审批人已通过"
+                    r.opinion = "或签模式自动通过"
                     r.acted_at = now
-                    if is_proxy_approver:
-                        r.actual_approver = approver_name
-                        r.proxy_source = proxy_principal_name
             level_complete = True
 
     next_level = approval.current_level + 1
