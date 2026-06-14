@@ -282,7 +282,13 @@ def apply_asset_data_scope(query, db: Session, user_id: int):
     if is_dept_manager(db, user_id):
         dept_users = get_dept_user_names(db, user.department)
         from app.models import Asset
-        query = query.filter(Asset.assignee.in_(dept_users))
+        from sqlalchemy import or_
+        query = query.filter(
+            or_(
+                Asset.assignee.in_(dept_users),
+                Asset.assignee == None,
+            )
+        )
     else:
         from app.models import Asset
         query = query.filter(Asset.assignee == user_name)

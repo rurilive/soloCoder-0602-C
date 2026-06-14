@@ -154,7 +154,7 @@ def get_asset(db: Session, asset_id: int, current_user: User | None = None) -> A
         user_name = get_user_display_name(current_user)
         if is_dept_manager(db, current_user.id):
             dept_users = get_dept_user_names(db, current_user.department)
-            if asset.assignee not in dept_users:
+            if asset.assignee is not None and asset.assignee not in dept_users:
                 raise HTTPException(status_code=403, detail="无权查看此资产")
         else:
             if asset.assignee != user_name:
@@ -174,7 +174,7 @@ def get_asset_by_tag(db: Session, asset_tag: str, current_user: User | None = No
         user_name = get_user_display_name(current_user)
         if is_dept_manager(db, current_user.id):
             dept_users = get_dept_user_names(db, current_user.department)
-            if asset.assignee not in dept_users:
+            if asset.assignee is not None and asset.assignee not in dept_users:
                 raise HTTPException(status_code=403, detail="无权查看此资产")
         else:
             if asset.assignee != user_name:
@@ -593,16 +593,18 @@ def get_approval(db: Session, approval_id: int, current_user: User | None = None
 
         is_pending_approver = False
         if approval.status == ApprovalStatus.PENDING:
-            current_node = (
+            pending_nodes = (
                 db.query(ApprovalNodeRecord)
                 .filter(
                     ApprovalNodeRecord.approval_id == approval_id,
-                    ApprovalNodeRecord.level == approval.current_level,
+                    ApprovalNodeRecord.status == ApprovalStatus.PENDING,
                 )
-                .first()
+                .all()
             )
-            if current_node and current_node.approver_role in user_role_codes:
-                is_pending_approver = True
+            for node in pending_nodes:
+                if node.approver_role in user_role_codes:
+                    is_pending_approver = True
+                    break
 
         in_dept = False
         if is_dept_manager(db, current_user.id):
