@@ -6,6 +6,8 @@ const STATUS_MAP = {
   pending: '待审批',
   approved: '已通过',
   rejected: '已驳回',
+  withdrawn: '已撤回',
+  escalated: '已升级',
 }
 
 const TYPE_MAP = {
@@ -18,10 +20,20 @@ function formatTime(t) {
   return new Date(t).toLocaleString('zh-CN')
 }
 
-function getNodeState(node, approval) {
-  if (node.status === 'approved') return 'approved'
-  if (node.status === 'rejected') return 'rejected'
-  if (approval.status === 'pending' && node.level === approval.current_level) return 'current'
+function getLevelState(levelRecords, approval) {
+  const hasRejected = levelRecords.some((r) => r.status === 'rejected')
+  if (hasRejected) return 'rejected'
+  const allApproved = levelRecords.length > 0 && levelRecords.every((r) => r.status === 'approved')
+  if (allApproved) return 'approved'
+  if (approval.status === 'pending' && levelRecords[0]?.level === approval.current_level) return 'current'
+  return 'pending'
+}
+
+function getApproverState(record) {
+  if (record.status === 'approved') return 'approved'
+  if (record.status === 'rejected') return 'rejected'
+  if (record.status === 'escalated') return 'current'
+  if (record.status === 'withdrawn') return 'rejected'
   return 'pending'
 }
 
@@ -84,7 +96,14 @@ function ChainTimeline({ approval }) {
     )
   }
 
-  const sortedNodes = [...nodes].sort((a, b) => a.level - b.level)
+  const levelGroups = {}
+  for (const node of nodes) {
+    if (!levelGroups[node.level]) levelGroups[node.level] = []
+    levelGroups[node.level].push(node)
+  }
+  const levels = Object.keys(levelGroups)
+    .map(Number)
+    .sort((a, b) => a - b)
 
   return (
     <div className="card">
@@ -95,39 +114,79 @@ function ChainTimeline({ approval }) {
         </span>
       </h3>
       <div className="approval-chain-timeline">
-        {sortedNodes.map((node, idx) => {
-          const state = getNodeState(node, approval)
+        {levels.map((level, levelIdx) => {
+          const records = levelGroups[level]
+          const state = getLevelState(records, approval)
+          const isMulti = records.length > 1
+          const role = records[0]?.approver_role
           return (
-            <div key={node.id} className={`approval-chain-node chain-node-${state}`}>
-              {idx < sortedNodes.length - 1 && <div className="chain-connector" />}
+            <div key={level} className={`approval-chain-node chain-node-${state}`}>
+              {levelIdx < levels.length - 1 && <div className="chain-connector" />}
               <NodeIcon state={state} />
               <div className="chain-node-content">
                 <div className="chain-node-title">
-                  <span>第 {node.level} 级 - {node.approver_role}</span>
-                  <span className={`status-badge status-${node.status}`} style={{ marginLeft: 8 }}>
-                    {STATUS_MAP[node.status]}
-                  </span>
+                  <span>第 {level} 级 - {role}</span>
+                  {isMulti && (
+                    <span className="status-badge status-pending" style={{ marginLeft: 6, fontSize: 11 }}>
+                      {records.length} 人并行
+                    </span>
+                  )}
                 </div>
-                <div className="chain-node-meta">
-                  审批人: {node.approver_name}
-                </div>
-                {(state === 'approved' || state === 'rejected') && (
-                  <>
-                    {node.opinion && (
-                      <div className="chain-node-opinion">意见: {node.opinion}</div>
-                    )}
-                    {node.acted_at && (
-                      <div className="chain-node-meta" style={{ fontSize: 12 }}>
-                        处理时间: {formatTime(node.acted_at)}
+                <div className="chain-level-approvers">
+                  {records.map((rec) => {
+                    const approverState = getApproverState(rec)
+                    return (
+                      <div key={rec.id} className={`chain-approver-row chain-approver-${approverState}`}>
+                        <span
+                          className="chain-approver-icon"
+                          style={{
+                            width: 6,
+                            height: 6,
+                            borderRadius: '50%',
+                            marginRight: 8,
+                            background:
+                              approverState === 'approved' ? 'var(--success)' :
+                              approverState === 'rejected' ? 'var(--danger)' :
+                              approverState === 'current' ? 'var(--primary)' : 'var(--border)',
+                            display: 'inline-block',
+                          }}
+                        />
+                        <div style={{ flex: 1 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                            <span style={{ fontWeight: 500 }}>{rec.approver_name}</span>
+                            <span className={`status-badge status-${rec.status}`} style={{ fontSize: 11 }}>
+                              {STATUS_MAP[rec.status]}
+                            </span>
+                            {rec.proxy_source && (
+                              <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+                                ({rec.proxy_source} 代理)
+                              </span>
+                            )}
+                          </div>
+                          {(rec.opinion || rec.acted_at) && (
+                            <div style={{ marginTop: 4 }}>
+                              {rec.opinion && (
+                                <div className="chain-node-opinion" style={{ marginTop: 0 }}>
+                                  意见: {rec.opinion}
+                                </div>
+                              )}
+                              {rec.acted_at && (
+                                <div className="chain-node-meta" style={{ fontSize: 12, marginTop: rec.opinion ? 2 : 0 }}>
+                                  处理时间: {formatTime(rec.acted_at)}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                          {approverState === 'current' && !rec.acted_at && (
+                            <div className="chain-node-meta" style={{ color: 'var(--primary)', fontSize: 12, fontWeight: 500 }}>
+                              等待审批中...
+                            </div>
+                          )}
+                        </div>
                       </div>
-                    )}
-                  </>
-                )}
-                {state === 'current' && (
-                  <div className="chain-node-meta" style={{ color: 'var(--primary)', fontWeight: 500 }}>
-                    等待审批中...
-                  </div>
-                )}
+                    )
+                  })}
+                </div>
               </div>
             </div>
           )

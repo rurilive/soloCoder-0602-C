@@ -1100,10 +1100,6 @@ def withdraw_approval(db: Session, approval_id: int, reason: str | None = None, 
             record.status = ApprovalStatus.WITHDRAWN
             record.acted_at = now
             record.opinion = "审批已撤回"
-        elif record.status == ApprovalStatus.ESCALATED:
-            record.status = ApprovalStatus.WITHDRAWN
-            if not record.opinion:
-                record.opinion = "审批已撤回"
 
     asset.status = approval.previous_status
 

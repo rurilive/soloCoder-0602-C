@@ -12,7 +12,19 @@ const TYPE_MAP = {
   scrap: '报废审批',
 }
 
-const EMPTY_NODE = { approver_role: '', approver_name: '' }
+const MODE_MAP = {
+  single: '单人通过',
+  all_sign: '会签',
+  or_sign: '或签',
+}
+
+const EMPTY_APPROVER = { approver_role: '', approver_name: '' }
+
+const EMPTY_NODE = {
+  mode: 'single',
+  timeout_minutes: '',
+  approvers: [{ ...EMPTY_APPROVER }],
+}
 
 const EMPTY_FORM = {
   name: '',
@@ -20,7 +32,7 @@ const EMPTY_FORM = {
   min_price: '',
   max_price: '',
   is_default: false,
-  nodes: [{ ...EMPTY_NODE }],
+  nodes: [{ ...EMPTY_NODE, approvers: [{ ...EMPTY_APPROVER }] }],
 }
 
 export default function ApprovalChainConfig() {
@@ -47,7 +59,10 @@ export default function ApprovalChainConfig() {
 
   const openCreateModal = () => {
     setEditingId(null)
-    setForm({ ...EMPTY_FORM, nodes: [{ ...EMPTY_NODE }] })
+    setForm({
+      ...EMPTY_FORM,
+      nodes: [{ ...EMPTY_NODE, approvers: [{ ...EMPTY_APPROVER }] }],
+    })
     setShowModal(true)
   }
 
@@ -60,8 +75,15 @@ export default function ApprovalChainConfig() {
       max_price: chain.max_price != null ? String(chain.max_price) : '',
       is_default: chain.is_default,
       nodes: chain.nodes.length > 0
-        ? chain.nodes.map((n) => ({ approver_role: n.approver_role, approver_name: n.approver_name }))
-        : [{ ...EMPTY_NODE }],
+        ? chain.nodes.map((n) => ({
+            mode: n.mode || 'single',
+            timeout_minutes: n.timeout_minutes != null ? String(n.timeout_minutes) : '',
+            approvers:
+              n.approvers && n.approvers.length > 0
+                ? n.approvers.map((a) => ({ approver_role: a.approver_role, approver_name: a.approver_name }))
+                : [{ approver_role: n.approver_role || '', approver_name: n.approver_name || '' }],
+          }))
+        : [{ ...EMPTY_NODE, approvers: [{ ...EMPTY_APPROVER }] }],
     })
     setShowModal(true)
   }
@@ -79,12 +101,28 @@ export default function ApprovalChainConfig() {
     setForm((prev) => {
       const nodes = [...prev.nodes]
       nodes[index] = { ...nodes[index], [field]: value }
+      if (field === 'mode' && value === 'single' && nodes[index].approvers.length > 1) {
+        nodes[index].approvers = nodes[index].approvers.slice(0, 1)
+      }
+      return { ...prev, nodes }
+    })
+  }
+
+  const handleApproverChange = (nodeIdx, approverIdx, field, value) => {
+    setForm((prev) => {
+      const nodes = [...prev.nodes]
+      const approvers = [...nodes[nodeIdx].approvers]
+      approvers[approverIdx] = { ...approvers[approverIdx], [field]: value }
+      nodes[nodeIdx] = { ...nodes[nodeIdx], approvers }
       return { ...prev, nodes }
     })
   }
 
   const addNode = () => {
-    setForm((prev) => ({ ...prev, nodes: [...prev.nodes, { ...EMPTY_NODE }] }))
+    setForm((prev) => ({
+      ...prev,
+      nodes: [...prev.nodes, { ...EMPTY_NODE, approvers: [{ ...EMPTY_APPROVER }] }],
+    }))
   }
 
   const removeNode = (index) => {
@@ -94,13 +132,55 @@ export default function ApprovalChainConfig() {
     }))
   }
 
+  const addApprover = (nodeIdx) => {
+    setForm((prev) => {
+      const nodes = [...prev.nodes]
+      if (nodes[nodeIdx].mode === 'single') return prev
+      nodes[nodeIdx] = {
+        ...nodes[nodeIdx],
+        approvers: [...nodes[nodeIdx].approvers, { ...EMPTY_APPROVER }],
+      }
+      return { ...prev, nodes }
+    })
+  }
+
+  const removeApprover = (nodeIdx, approverIdx) => {
+    setForm((prev) => {
+      const nodes = [...prev.nodes]
+      if (nodes[nodeIdx].approvers.length <= 1) return prev
+      nodes[nodeIdx] = {
+        ...nodes[nodeIdx],
+        approvers: nodes[nodeIdx].approvers.filter((_, i) => i !== approverIdx),
+      }
+      return { ...prev, nodes }
+    })
+  }
+
   const handleSubmit = async (e) => {
     e.preventDefault()
     if (!form.name.trim()) {
       alert('请输入审批链名称')
       return
     }
-    const validNodes = form.nodes.filter((n) => n.approver_role.trim() && n.approver_name.trim())
+    const validNodes = []
+    for (const node of form.nodes) {
+      const validApprovers = node.approvers.filter(
+        (a) => a.approver_role.trim() && a.approver_name.trim()
+      )
+      if (validApprovers.length === 0) {
+        alert('请为每个审批节点至少配置一个审批人')
+        return
+      }
+      if (node.mode === 'single' && validApprovers.length > 1) {
+        alert('单人通过模式每个节点只能有一个审批人')
+        return
+      }
+      validNodes.push({
+        mode: node.mode,
+        timeout_minutes: node.timeout_minutes !== '' ? parseInt(node.timeout_minutes, 10) : null,
+        approvers: validApprovers,
+      })
+    }
     if (validNodes.length === 0) {
       alert('请至少添加一个审批节点')
       return
@@ -177,7 +257,7 @@ export default function ApprovalChainConfig() {
 
       {showModal && (
         <div className="modal-overlay" onClick={closeModal}>
-          <div className="modal" style={{ maxWidth: 560 }} onClick={(e) => e.stopPropagation()}>
+          <div className="modal" style={{ maxWidth: 620 }} onClick={(e) => e.stopPropagation()}>
             <h3>{editingId ? '编辑审批链' : '新建审批链'}</h3>
             <form onSubmit={handleSubmit}>
               <div className="form-grid" style={{ marginBottom: 16 }}>
@@ -247,35 +327,88 @@ export default function ApprovalChainConfig() {
                   </button>
                 </div>
                 <div className="chain-form-nodes">
-                  {form.nodes.map((node, i) => (
-                    <div key={i} className="chain-form-node-row">
-                      <span style={{ color: 'var(--text-secondary)', fontWeight: 600, minWidth: 20 }}>
-                        {i + 1}.
-                      </span>
-                      <div className="form-group" style={{ flex: 1 }}>
-                        <input
-                          type="text"
-                          value={node.approver_role}
-                          onChange={(e) => handleNodeChange(i, 'approver_role', e.target.value)}
-                          placeholder="审批角色"
-                        />
+                  {form.nodes.map((node, nodeIdx) => (
+                    <div key={nodeIdx} className="chain-form-node-block">
+                      <div className="chain-form-node-header">
+                        <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>
+                          第 {nodeIdx + 1} 级
+                        </span>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <div className="form-group" style={{ marginBottom: 0, minWidth: 140 }}>
+                            <select
+                              value={node.mode}
+                              onChange={(e) => handleNodeChange(nodeIdx, 'mode', e.target.value)}
+                            >
+                              {Object.entries(MODE_MAP).map(([k, v]) => (
+                                <option key={k} value={k}>{v}</option>
+                              ))}
+                            </select>
+                          </div>
+                          <div className="form-group" style={{ marginBottom: 0, minWidth: 110 }}>
+                            <input
+                              type="number"
+                              min="1"
+                              placeholder="超时(min)"
+                              value={node.timeout_minutes}
+                              onChange={(e) => handleNodeChange(nodeIdx, 'timeout_minutes', e.target.value)}
+                            />
+                          </div>
+                          <button
+                            type="button"
+                            className="btn btn-danger btn-sm"
+                            onClick={() => removeNode(nodeIdx)}
+                            disabled={form.nodes.length <= 1}
+                          >
+                            删除节点
+                          </button>
+                        </div>
                       </div>
-                      <div className="form-group" style={{ flex: 1 }}>
-                        <input
-                          type="text"
-                          value={node.approver_name}
-                          onChange={(e) => handleNodeChange(i, 'approver_name', e.target.value)}
-                          placeholder="审批人"
-                        />
+                      <div className="chain-form-approvers">
+                        {node.approvers.map((approver, approverIdx) => (
+                          <div key={approverIdx} className="chain-form-approver-row">
+                            <span style={{ color: 'var(--text-secondary)', minWidth: 28, fontSize: 12 }}>
+                              {node.mode !== 'single' ? `#${approverIdx + 1}` : ''}
+                            </span>
+                            <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
+                              <input
+                                type="text"
+                                value={approver.approver_role}
+                                onChange={(e) => handleApproverChange(nodeIdx, approverIdx, 'approver_role', e.target.value)}
+                                placeholder="审批角色"
+                              />
+                            </div>
+                            <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
+                              <input
+                                type="text"
+                                value={approver.approver_name}
+                                onChange={(e) => handleApproverChange(nodeIdx, approverIdx, 'approver_name', e.target.value)}
+                                placeholder="审批人"
+                              />
+                            </div>
+                            {node.mode !== 'single' && (
+                              <button
+                                type="button"
+                                className="btn btn-outline btn-sm"
+                                onClick={() => removeApprover(nodeIdx, approverIdx)}
+                                disabled={node.approvers.length <= 1}
+                              >
+                                移除
+                              </button>
+                            )}
+                          </div>
+                        ))}
+                        {node.mode !== 'single' && (
+                          <div style={{ padding: '4px 0 4px 28px' }}>
+                            <button
+                              type="button"
+                              className="btn btn-outline btn-sm"
+                              onClick={() => addApprover(nodeIdx)}
+                            >
+                              + 添加审批人
+                            </button>
+                          </div>
+                        )}
                       </div>
-                      <button
-                        type="button"
-                        className="btn btn-danger btn-sm"
-                        onClick={() => removeNode(i)}
-                        disabled={form.nodes.length <= 1}
-                      >
-                        删除
-                      </button>
                     </div>
                   ))}
                 </div>
@@ -392,28 +525,61 @@ function ChainCard({ chain, onEdit, onDelete, onReorder }) {
 
         {localNodes.length > 0 && (
           <div className="chain-nodes">
-            {localNodes.map((node, i) => (
-              <div
-                key={node.id}
-                className={[
-                  'chain-node-item',
-                  draggingIdx === i ? 'chain-node-dragging' : '',
-                  dropTargetIdx === i ? 'chain-node-drop-target' : '',
-                ].filter(Boolean).join(' ')}
-                draggable
-                onDragStart={(e) => handleDragStart(e, i)}
-                onDragEnter={(e) => handleDragEnter(e, i)}
-                onDragOver={handleDragOver}
-                onDragLeave={handleDragLeave}
-                onDrop={(e) => handleDrop(e, i)}
-                onDragEnd={handleDragEnd}
-              >
-                <span className="chain-node-drag-handle" title="拖拽排序">≡</span>
-                <span style={{ fontWeight: 500, minWidth: 24 }}>L{node.level}</span>
-                <span style={{ color: 'var(--text-secondary)' }}>{node.approver_role}</span>
-                <span>— {node.approver_name}</span>
-              </div>
-            ))}
+            {localNodes.map((node, i) => {
+              const approvers = node.approvers && node.approvers.length > 0
+                ? node.approvers
+                : [{ approver_role: node.approver_role, approver_name: node.approver_name }]
+              const modeLabel = MODE_MAP[node.mode] || '单人通过'
+              const isSingle = !node.mode || node.mode === 'single'
+              return (
+                <div
+                  key={node.id}
+                  className={[
+                    'chain-node-item',
+                    draggingIdx === i ? 'chain-node-dragging' : '',
+                    dropTargetIdx === i ? 'chain-node-drop-target' : '',
+                  ].filter(Boolean).join(' ')}
+                  draggable
+                  onDragStart={(e) => handleDragStart(e, i)}
+                  onDragEnter={(e) => handleDragEnter(e, i)}
+                  onDragOver={handleDragOver}
+                  onDragLeave={handleDragLeave}
+                  onDrop={(e) => handleDrop(e, i)}
+                  onDragEnd={handleDragEnd}
+                >
+                  <span className="chain-node-drag-handle" title="拖拽排序">≡</span>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: isSingle ? 0 : 4 }}>
+                      <span style={{ fontWeight: 500, minWidth: 24 }}>L{node.level}</span>
+                      {!isSingle && (
+                        <span className="status-badge status-pending" style={{ fontSize: 11 }}>
+                          {modeLabel}
+                        </span>
+                      )}
+                      {isSingle && (
+                        <>
+                          <span style={{ color: 'var(--text-secondary)' }}>
+                            {approvers[0]?.approver_role || node.approver_role || '-'}
+                          </span>
+                          <span>— {approvers[0]?.approver_name || node.approver_name || '-'}</span>
+                        </>
+                      )}
+                    </div>
+                    {!isSingle && approvers.length > 0 && (
+                      <div className="chain-node-approvers">
+                        {approvers.map((a, idx) => (
+                          <div key={idx} className="chain-node-approver-item">
+                            <span style={{ color: 'var(--text-secondary)', marginRight: 4 }}>#{idx + 1}</span>
+                            <span style={{ color: 'var(--text-secondary)' }}>{a.approver_role || '-'}</span>
+                            <span>— {a.approver_name || '-'}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )
+            })}
           </div>
         )}
       </div>
