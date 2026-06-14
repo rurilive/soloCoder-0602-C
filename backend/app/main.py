@@ -267,6 +267,23 @@ def _migrate_add_countersign_columns():
                 db.commit()
                 print(f"[数据迁移] 已将 {len(existing_nodes)} 条原有审批链节点数据迁移到 approval_chain_node_approvers 表")
 
+            try:
+                db.execute(text("ALTER TABLE approval_chain_nodes DROP COLUMN approver_role"))
+                db.execute(text("ALTER TABLE approval_chain_nodes DROP COLUMN approver_name"))
+                db.commit()
+                print("[数据迁移] approval_chain_nodes 已删除旧的 approver_role/approver_name 列")
+            except Exception as drop_err:
+                db.rollback()
+                try:
+                    db.execute(text("CREATE TABLE approval_chain_nodes_new AS SELECT id, chain_id, level, mode, timeout_minutes, default_next_level, created_at FROM approval_chain_nodes"))
+                    db.execute(text("DROP TABLE approval_chain_nodes"))
+                    db.execute(text("ALTER TABLE approval_chain_nodes_new RENAME TO approval_chain_nodes"))
+                    db.commit()
+                    print("[数据迁移] approval_chain_nodes 已重建（移除旧列）")
+                except Exception as rebuild_err:
+                    db.rollback()
+                    print(f"[数据迁移] 无法移除旧列: {drop_err}, {rebuild_err}")
+
     except Exception as e:
         db.rollback()
         print(f"[数据迁移] 会签功能迁移失败: {e}")

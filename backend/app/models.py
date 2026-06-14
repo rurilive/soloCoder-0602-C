@@ -181,6 +181,7 @@ class ApprovalNodeRecord(Base):
     chain_node_id: Mapped[int] = mapped_column(Integer, ForeignKey("approval_chain_nodes.id"), nullable=False)
     chain_node_approver_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("approval_chain_node_approvers.id"), nullable=True)
     level: Mapped[int] = mapped_column(Integer, nullable=False)
+    chain_node_level: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     approver_role: Mapped[str] = mapped_column(String(64), nullable=False)
     approver_name: Mapped[str] = mapped_column(String(128), nullable=False)
     status: Mapped[ApprovalStatus] = mapped_column(Enum(ApprovalStatus), default=ApprovalStatus.PENDING, nullable=False)

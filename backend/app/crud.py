@@ -1388,12 +1388,14 @@ def _trigger_escalation_by_reminder(
     should_reject = False
     reason_for_reject = ""
 
-    if current_level < approval.total_levels:
+    next_level = _get_next_record_level(db, approval.id, current_level)
+
+    if next_level is not None:
         next_records = (
             db.query(ApprovalNodeRecord)
             .filter(
                 ApprovalNodeRecord.approval_id == approval.id,
-                ApprovalNodeRecord.level == current_level + 1,
+                ApprovalNodeRecord.level == next_level,
             )
             .all()
         )
@@ -1410,8 +1412,8 @@ def _trigger_escalation_by_reminder(
                 should_reject = True
                 reason_for_reject = "下一级角色权限不高于当前级，避免升级死循环，自动驳回"
 
-    if not should_reject and current_level < approval.total_levels:
-        approval.current_level = current_level + 1
+    if not should_reject and next_level is not None:
+        approval.current_level = next_level
         _set_next_level_timeout(db, approval, "remind_escalation")
 
         node_mode = _get_node_mode(db, pending_records[0].chain_node_id)
@@ -1426,7 +1428,7 @@ def _trigger_escalation_by_reminder(
             action="催办超时升级",
             operator="系统",
             operator_id=None,
-            detail=f"第{current_level}/{approval.total_levels}级{mode_desc}催办{node_reminder_count}次未响应，自动升级到第{current_level + 1}级（升级{len(pending_records)}人）",
+            detail=f"第{current_level}/{approval.total_levels}级{mode_desc}催办{node_reminder_count}次未响应，自动升级到第{next_level}级（升级{len(pending_records)}人）",
         )
         db.add(log)
 
@@ -1434,7 +1436,7 @@ def _trigger_escalation_by_reminder(
             module="approval",
             action="reminder_escalate",
             operator="系统",
-            detail=f"审批单#{approval.id}第{current_level}级{mode_desc}催办{node_reminder_count}次未响应，升级到第{current_level + 1}级（升级{len(pending_records)}人）",
+            detail=f"审批单#{approval.id}第{current_level}级{mode_desc}催办{node_reminder_count}次未响应，升级到第{next_level}级（升级{len(pending_records)}人）",
         )
         db.add(op_log)
     else:
@@ -2061,12 +2063,14 @@ def check_and_process_timeouts(db: Session) -> list[dict]:
         should_reject = False
         reason_for_reject = ""
 
-        if level < approval.total_levels:
+        next_level = _get_next_record_level(db, approval.id, level)
+
+        if next_level is not None:
             next_records = (
                 db.query(ApprovalNodeRecord)
                 .filter(
                     ApprovalNodeRecord.approval_id == approval.id,
-                    ApprovalNodeRecord.level == level + 1,
+                    ApprovalNodeRecord.level == next_level,
                 )
                 .all()
             )
@@ -2083,8 +2087,8 @@ def check_and_process_timeouts(db: Session) -> list[dict]:
                     should_reject = True
                     reason_for_reject = "下一级角色权限不高于当前级，避免升级死循环，自动驳回"
 
-        if not should_reject and level < approval.total_levels:
-            approval.current_level = level + 1
+        if not should_reject and next_level is not None:
+            approval.current_level = next_level
             _set_next_level_timeout(db, approval, "check_and_process_timeouts")
 
             mode_desc = {
@@ -2098,7 +2102,7 @@ def check_and_process_timeouts(db: Session) -> list[dict]:
                 action="审批超时升级",
                 operator="系统",
                 operator_id=None,
-                detail=f"第{level}/{approval.total_levels}级{mode_desc}超时，自动升级到第{level + 1}级（升级{len(pending_records)}人）",
+                detail=f"第{level}/{approval.total_levels}级{mode_desc}超时，自动升级到第{next_level}级（升级{len(pending_records)}人）",
             )
             db.add(log)
 
@@ -2106,7 +2110,7 @@ def check_and_process_timeouts(db: Session) -> list[dict]:
                 module="approval",
                 action="timeout_escalate",
                 operator="系统",
-                detail=f"审批单#{approval.id}第{level}级{mode_desc}超时，升级到第{level + 1}级（升级{len(pending_records)}人）",
+                detail=f"审批单#{approval.id}第{level}级{mode_desc}超时，升级到第{next_level}级（升级{len(pending_records)}人）",
             )
             db.add(op_log)
 
@@ -2114,7 +2118,7 @@ def check_and_process_timeouts(db: Session) -> list[dict]:
                 "approval_id": approval.id,
                 "level": level,
                 "action": "escalated",
-                "new_level": level + 1,
+                "new_level": next_level,
                 "escalated_count": len(pending_records),
             })
         else:
