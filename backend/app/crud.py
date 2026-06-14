@@ -977,38 +977,6 @@ def withdraw_approval(db: Session, approval_id: int, reason: str | None = None, 
 
     asset.status = approval.previous_status
 
-    pending_approver_roles = set()
-    for record in node_records:
-        if record.status == ApprovalStatus.WITHDRAWN and record.opinion == "审批已撤回":
-            pending_approver_roles.add(record.approver_role)
-
-    if pending_approver_roles:
-        affected_role_ids = (
-            db.query(UserRole.role_id)
-            .join(Role, UserRole.role_id == Role.id)
-            .filter(Role.code.in_(pending_approver_roles))
-            .distinct()
-            .subquery()
-        )
-        affected_user_ids = [
-            ur.user_id
-            for ur in db.query(UserRole.user_id)
-            .filter(UserRole.role_id.in_(affected_role_ids))
-            .distinct()
-            .all()
-        ]
-        if affected_user_ids:
-            active_related_proxies = (
-                db.query(ApprovalProxy)
-                .filter(
-                    ApprovalProxy.principal_user_id.in_(affected_user_ids),
-                    ApprovalProxy.is_active == True,
-                )
-                .all()
-            )
-            for proxy in active_related_proxies:
-                proxy.is_active = False
-
     applicant_display = applicant.real_name or applicant.username if applicant else approval.applicant
     applicant_id = applicant.id if applicant else None
 
@@ -1139,6 +1107,7 @@ def remind_approval(db: Session, approval_id: int, message: str | None = None, a
         message=message,
     )
     db.add(reminder)
+    db.flush()
 
     approval.reminder_count = approval.reminder_count + 1
     approval.last_reminder_at = now
@@ -1351,7 +1320,10 @@ def get_my_pending_approvals(
                     )
                     for aid in db.query(Approval.id).filter(Approval.id.in_(proxy_ids)).all():
                         approval_obj = db.query(Approval).filter(Approval.id == aid[0]).first()
-                        if approval_obj and approval_obj.applicant != (current_user.real_name or current_user.username) and approval_obj.applicant != current_user.username:
+                        if (approval_obj
+                                and approval_obj.status != ApprovalStatus.WITHDRAWN
+                                and approval_obj.applicant != (current_user.real_name or current_user.username)
+                                and approval_obj.applicant != current_user.username):
                             proxy_approval_ids.add(aid[0])
 
         from sqlalchemy import or_
