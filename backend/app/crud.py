@@ -61,6 +61,28 @@ HEADER_MAP = {
     "购买价格/purchase_price": "purchase_price",
 }
 
+BUILTIN_ROLE_HIERARCHY: dict[str, int] = {
+    "super_admin": 100,
+    "asset_admin": 90,
+    "finance_manager": 80,
+    "dept_manager": 70,
+    "employee": 10,
+}
+
+
+def _role_is_truly_higher(current_role: str, next_role: str) -> bool:
+    if current_role == next_role:
+        return False
+    current_rank = BUILTIN_ROLE_HIERARCHY.get(current_role)
+    next_rank = BUILTIN_ROLE_HIERARCHY.get(next_role)
+    if current_rank is None and next_rank is None:
+        return False
+    if current_rank is None:
+        return True
+    if next_rank is None:
+        return False
+    return next_rank > current_rank
+
 
 def generate_asset_tag(db: Session) -> str:
     today = datetime.now().strftime("%Y%m%d")
@@ -527,10 +549,12 @@ def create_approval(db: Session, asset_id: int, data: ApprovalCreate, applicant:
             .all()
         )
         now = datetime.now()
+        cumulative_minutes = 0
         for idx, node in enumerate(nodes):
             timeout_at = None
             if node.timeout_minutes is not None:
-                timeout_at = now + timedelta(minutes=node.timeout_minutes) if idx == 0 else None
+                cumulative_minutes += node.timeout_minutes
+                timeout_at = now + timedelta(minutes=cumulative_minutes)
             record = ApprovalNodeRecord(
                 approval_id=approval.id,
                 chain_node_id=node.id,
@@ -1288,7 +1312,23 @@ def check_and_process_timeouts(db: Session) -> list[dict]:
         record.acted_at = now
         record.opinion = "审批超时，自动升级"
 
+        should_reject = False
+        reason_for_reject = ""
+
         if record.level < approval.total_levels:
+            next_record = (
+                db.query(ApprovalNodeRecord)
+                .filter(
+                    ApprovalNodeRecord.approval_id == approval.id,
+                    ApprovalNodeRecord.level == record.level + 1,
+                )
+                .first()
+            )
+            if next_record and not _role_is_truly_higher(record.approver_role, next_record.approver_role):
+                should_reject = True
+                reason_for_reject = f"下一级角色（{next_record.approver_role}）权限不高于当前级（{record.approver_role}），避免升级死循环，自动驳回"
+
+        if not should_reject and record.level < approval.total_levels:
             approval.current_level = record.level + 1
             _set_next_level_timeout(db, approval)
 
@@ -1316,9 +1356,13 @@ def check_and_process_timeouts(db: Session) -> list[dict]:
                 "new_level": record.level + 1,
             })
         else:
+            if should_reject:
+                final_reason = reason_for_reject
+            else:
+                final_reason = "最高级审批超时，自动驳回"
             approval.status = ApprovalStatus.REJECTED
             approval.approver = "系统"
-            approval.approval_opinion = "最高级审批超时，自动驳回"
+            approval.approval_opinion = final_reason
 
             asset.status = approval.previous_status
 
@@ -1334,12 +1378,15 @@ def check_and_process_timeouts(db: Session) -> list[dict]:
             for r in remaining_records:
                 r.status = ApprovalStatus.REJECTED
 
+            log_detail = (
+                f"（第{record.level}/{approval.total_levels}级）{final_reason}，资产状态恢复为{approval.previous_status.value}"
+            )
             log = AssetLog(
                 asset_id=asset.id,
                 action="审批超时驳回",
                 operator="系统",
                 operator_id=None,
-                detail=f"最高级（第{record.level}/{approval.total_levels}级）审批超时，自动驳回，资产状态恢复为{approval.previous_status.value}",
+                detail=log_detail,
             )
             db.add(log)
 
@@ -1347,7 +1394,7 @@ def check_and_process_timeouts(db: Session) -> list[dict]:
                 module="approval",
                 action="timeout_reject",
                 operator="系统",
-                detail=f"审批单#{approval.id}最高级审批超时，自动驳回",
+                detail=f"审批单#{approval.id}{final_reason}",
             )
             db.add(op_log)
 
@@ -1355,7 +1402,7 @@ def check_and_process_timeouts(db: Session) -> list[dict]:
                 "approval_id": approval.id,
                 "level": record.level,
                 "action": "rejected",
-                "reason": "最高级审批超时",
+                "reason": final_reason,
             })
 
     if processed:
