@@ -267,23 +267,6 @@ def _migrate_add_countersign_columns():
                 db.commit()
                 print(f"[数据迁移] 已将 {len(existing_nodes)} 条原有审批链节点数据迁移到 approval_chain_node_approvers 表")
 
-            try:
-                db.execute(text("ALTER TABLE approval_chain_nodes DROP COLUMN approver_role"))
-                db.execute(text("ALTER TABLE approval_chain_nodes DROP COLUMN approver_name"))
-                db.commit()
-                print("[数据迁移] approval_chain_nodes 已删除旧的 approver_role/approver_name 列")
-            except Exception as drop_err:
-                db.rollback()
-                try:
-                    db.execute(text("CREATE TABLE approval_chain_nodes_new AS SELECT id, chain_id, level, mode, timeout_minutes, default_next_level, created_at FROM approval_chain_nodes"))
-                    db.execute(text("DROP TABLE approval_chain_nodes"))
-                    db.execute(text("ALTER TABLE approval_chain_nodes_new RENAME TO approval_chain_nodes"))
-                    db.commit()
-                    print("[数据迁移] approval_chain_nodes 已重建（移除旧列）")
-                except Exception as rebuild_err:
-                    db.rollback()
-                    print(f"[数据迁移] 无法移除旧列: {drop_err}, {rebuild_err}")
-
     except Exception as e:
         db.rollback()
         print(f"[数据迁移] 会签功能迁移失败: {e}")
@@ -308,6 +291,44 @@ def _migrate_add_conditional_branch_columns():
                 db.execute(text("ALTER TABLE approval_chain_nodes ADD COLUMN default_next_level INTEGER"))
                 db.commit()
                 print("[数据迁移] approval_chain_nodes 新增 default_next_level 列")
+
+            if "approver_role" in chain_node_cols or "approver_name" in chain_node_cols:
+                print("[数据迁移] 检测到 approval_chain_nodes 存在旧列，开始安全重建表...")
+                db.execute(text("PRAGMA foreign_keys = OFF"))
+                try:
+                    db.execute(text("""
+                        CREATE TABLE approval_chain_nodes_new (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            chain_id INTEGER NOT NULL,
+                            level INTEGER NOT NULL,
+                            mode VARCHAR(32) NOT NULL DEFAULT 'single',
+                            timeout_minutes INTEGER,
+                            default_next_level INTEGER,
+                            created_at DATETIME NOT NULL,
+                            CONSTRAINT fk_chain_nodes_chain FOREIGN KEY (chain_id) REFERENCES approval_chains (id)
+                        )
+                    """))
+                    db.execute(text("""
+                        INSERT INTO approval_chain_nodes_new (id, chain_id, level, mode, timeout_minutes, default_next_level, created_at)
+                        SELECT id, chain_id, level, COALESCE(mode, 'single'), timeout_minutes, default_next_level, created_at
+                        FROM approval_chain_nodes
+                    """))
+                    new_count = db.execute(text("SELECT COUNT(*) FROM approval_chain_nodes_new")).scalar()
+                    old_count = db.execute(text("SELECT COUNT(*) FROM approval_chain_nodes")).scalar()
+                    if new_count != old_count:
+                        raise ValueError(f"数据不一致：旧表{old_count}条，新表{new_count}条")
+                    db.execute(text("DROP TABLE approval_chain_nodes"))
+                    db.execute(text("ALTER TABLE approval_chain_nodes_new RENAME TO approval_chain_nodes"))
+                    db.execute(text("CREATE INDEX ix_approval_chain_nodes_chain_id ON approval_chain_nodes (chain_id)"))
+                    db.commit()
+                    print(f"[数据迁移] approval_chain_nodes 安全重建完成，移除旧列，保留 {new_count} 条数据")
+                except Exception as rebuild_err:
+                    db.rollback()
+                    print(f"[数据迁移] 重建表失败，回滚：{rebuild_err}")
+                    raise
+                finally:
+                    db.execute(text("PRAGMA foreign_keys = ON"))
+                    db.commit()
 
         if insp.has_table("approval_node_records"):
             node_record_cols = {c["name"] for c in insp.get_columns("approval_node_records")}
