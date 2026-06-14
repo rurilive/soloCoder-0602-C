@@ -131,7 +131,7 @@ def _migrate_purchase_department():
     except Exception as e:
         db.rollback()
         print(f"[数据迁移] 迁移失败: {e}")
-        raise e
+        return
     finally:
         db.close()
 
