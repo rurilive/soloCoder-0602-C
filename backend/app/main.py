@@ -355,6 +355,41 @@ def _migrate_add_conditional_branch_columns():
         db.close()
 
 
+def _migrate_add_signer_transfer_columns():
+    db: Session = SessionLocal()
+    try:
+        from sqlalchemy import inspect, text
+        insp = inspect(engine)
+
+        if not insp.has_table("approval_node_actions"):
+            print("[数据迁移] approval_node_actions 表将由 SQLAlchemy 自动创建")
+
+        if insp.has_table("approval_node_records"):
+            node_record_cols = {c["name"] for c in insp.get_columns("approval_node_records")}
+            new_cols = {
+                "record_type": "VARCHAR(32) NOT NULL DEFAULT 'normal'",
+                "is_added_signer": "BOOLEAN NOT NULL DEFAULT 0",
+                "added_signer_by": "VARCHAR(128)",
+                "added_signer_reason": "TEXT",
+                "transfer_status": "VARCHAR(32)",
+                "transferred_from": "VARCHAR(128)",
+                "transferred_to": "VARCHAR(128)",
+                "transfer_reason": "TEXT",
+                "source_record_id": "INTEGER",
+            }
+            for col_name, col_type in new_cols.items():
+                if col_name not in node_record_cols:
+                    db.execute(text(f"ALTER TABLE approval_node_records ADD COLUMN {col_name} {col_type}"))
+                    db.commit()
+                    print(f"[数据迁移] approval_node_records 新增 {col_name} 列")
+
+    except Exception as e:
+        db.rollback()
+        print(f"[数据迁移] 加签转审功能迁移失败: {e}")
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
@@ -364,6 +399,7 @@ async def lifespan(app: FastAPI):
     _migrate_add_withdraw_reminder_columns()
     _migrate_add_countersign_columns()
     _migrate_add_conditional_branch_columns()
+    _migrate_add_signer_transfer_columns()
     task = asyncio.create_task(_background_timeout_checker())
     yield
     task.cancel()

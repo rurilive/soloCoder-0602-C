@@ -10,7 +10,9 @@ from app.models import (
     Approval, ApprovalType, ApprovalStatus, ApprovalMode,
     ApprovalChain, ApprovalChainNode, ApprovalChainNodeApprover, ApprovalNodeRecord,
     ApprovalChainCondition, ApprovalChainConditionRule,
-    ApprovalProxy, ApprovalReminder, OperationLog,
+    ApprovalProxy, ApprovalReminder, ApprovalNodeAction,
+    ApprovalNodeActionType, ApprovalRecordType, TransferStatus,
+    OperationLog,
     User, Role, UserRole,
     Notification, NotificationType,
 )
@@ -18,6 +20,9 @@ from app.condition_engine import (
     ConditionEvaluationContext,
     resolve_next_level,
     detect_cycle,
+)
+from app.schemas import (
+    ApprovalTimelineEvent,
 )
 
 logger = logging.getLogger(__name__)
@@ -1630,6 +1635,570 @@ def get_approval_node_records(db: Session, approval_id: int) -> list[ApprovalNod
         .order_by(ApprovalNodeRecord.level.asc())
         .all()
     )
+
+
+def get_approval_node_actions(db: Session, approval_id: int) -> list[ApprovalNodeAction]:
+    return (
+        db.query(ApprovalNodeAction)
+        .filter(ApprovalNodeAction.approval_id == approval_id)
+        .order_by(ApprovalNodeAction.created_at.asc())
+        .all()
+    )
+
+
+def _get_user_by_id(db: Session, user_id: int) -> User:
+    from app.auth import get_user_display_name
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    return user
+
+
+def _get_node_record(db: Session, node_record_id: int) -> ApprovalNodeRecord:
+    record = db.query(ApprovalNodeRecord).filter(ApprovalNodeRecord.id == node_record_id).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="审批节点记录不存在")
+    return record
+
+
+def _get_user_highest_role_rank(db: Session, user_id: int) -> int:
+    role_codes = _get_user_role_codes(db, user_id)
+    max_rank = 0
+    for code in role_codes:
+        rank = BUILTIN_ROLE_HIERARCHY.get(code, 0)
+        if rank > max_rank:
+            max_rank = rank
+    return max_rank
+
+
+def add_approval_signer(
+    db: Session,
+    approval_id: int,
+    node_record_id: int,
+    target_user_id: int,
+    reason: str | None,
+    operator: User,
+) -> Approval:
+    from app.auth import get_user_display_name
+
+    approval = get_approval(db, approval_id, operator)
+    if approval.status != ApprovalStatus.PENDING:
+        raise HTTPException(status_code=400, detail="审批单已处理，不可加签")
+
+    node_record = _get_node_record(db, node_record_id)
+    if node_record.approval_id != approval_id:
+        raise HTTPException(status_code=400, detail="节点记录不属于该审批单")
+
+    if node_record.level != approval.current_level:
+        raise HTTPException(status_code=400, detail="只能对当前审批节点进行加签")
+
+    node_mode = _get_node_mode(db, node_record.chain_node_id)
+    if node_mode != ApprovalMode.ALL_SIGN:
+        raise HTTPException(status_code=400, detail="只能对会签节点进行加签")
+
+    current_level_records = (
+        db.query(ApprovalNodeRecord)
+        .filter(
+            ApprovalNodeRecord.approval_id == approval_id,
+            ApprovalNodeRecord.level == approval.current_level,
+        )
+        .all()
+    )
+
+    approved_count = sum(1 for r in current_level_records if r.status == ApprovalStatus.APPROVED)
+    if approved_count == 0:
+        raise HTTPException(status_code=400, detail="会签节点尚未有人通过，不可加签")
+
+    all_approved = all(r.status == ApprovalStatus.APPROVED for r in current_level_records)
+    if all_approved:
+        raise HTTPException(status_code=400, detail="会签节点已全员通过，不可加签")
+
+    operator_name = get_user_display_name(operator)
+    if approval.applicant != operator_name:
+        from app.auth import is_admin_user
+        if not is_admin_user(db, operator.id):
+            raise HTTPException(status_code=403, detail="只有审批单申请人或管理员可以加签")
+
+    target_user = _get_user_by_id(db, target_user_id)
+    target_user_name = get_user_display_name(target_user)
+    target_user_roles = _get_user_role_codes(db, target_user_id)
+    if not target_user_roles:
+        raise HTTPException(status_code=400, detail="目标用户没有分配角色，无法作为审批人")
+
+    for record in current_level_records:
+        if record.approver_name == target_user_name:
+            raise HTTPException(status_code=400, detail="该用户已是当前节点的审批人")
+
+    target_role = max(target_user_roles, key=lambda r: BUILTIN_ROLE_HIERARCHY.get(r, 0))
+
+    existing_chain_approver = (
+        db.query(ApprovalChainNodeApprover)
+        .filter(
+            ApprovalChainNodeApprover.chain_node_id == node_record.chain_node_id,
+            ApprovalChainNodeApprover.approver_name == target_user_name,
+        )
+        .first()
+    )
+    chain_node_approver_id = existing_chain_approver.id if existing_chain_approver else None
+
+    now = datetime.now()
+    new_record = ApprovalNodeRecord(
+        approval_id=approval_id,
+        chain_node_id=node_record.chain_node_id,
+        chain_node_approver_id=chain_node_approver_id,
+        level=approval.current_level,
+        chain_node_level=node_record.chain_node_level,
+        approver_role=target_role,
+        approver_name=target_user_name,
+        status=ApprovalStatus.PENDING,
+        record_type=ApprovalRecordType.ADDED_SIGNER,
+        is_added_signer=True,
+        added_signer_by=operator_name,
+        added_signer_reason=reason,
+    )
+    db.add(new_record)
+    db.flush()
+
+    action = ApprovalNodeAction(
+        approval_id=approval_id,
+        node_record_id=node_record_id,
+        level=approval.current_level,
+        action_type=ApprovalNodeActionType.ADD_SIGNER,
+        operator=operator_name,
+        operator_id=operator.id,
+        target_user=target_user_name,
+        target_user_id=target_user_id,
+        target_role=target_role,
+        reason=reason,
+    )
+    db.add(action)
+
+    op_log = OperationLog(
+        module="approval",
+        action="add_signer",
+        operator=operator_name,
+        operator_id=operator.id,
+        target_type="approval",
+        target_id=approval_id,
+        detail=f"会签加签：追加审批人 {target_user_name}（角色：{target_role}）到第{approval.current_level}级会签节点。原因：{reason or '无'}",
+    )
+    db.add(op_log)
+
+    asset = get_asset(db, approval.asset_id)
+    log = AssetLog(
+        asset_id=asset.id,
+        action="会签加签",
+        operator=operator_name,
+        operator_id=operator.id,
+        detail=f"第{approval.current_level}级会签节点追加审批人：{target_user_name}（角色：{target_role}）。原因：{reason or '无'}",
+    )
+    db.add(log)
+
+    action_type = "领用" if approval.approval_type == ApprovalType.ALLOCATE else "报废"
+    notification_title = f"审批加签通知：{action_type}申请"
+    notification_content = (
+        f"{operator_name} 对 {action_type}审批单（#{approval.id}）进行了加签操作，"
+        f"您被追加为第{approval.current_level}级会签审批人，请尽快处理。"
+    )
+    if reason:
+        notification_content += f"\n加签原因：{reason}"
+    _create_notification(
+        db,
+        user_id=target_user_id,
+        notification_type=NotificationType.APPROVAL_SUBMITTED,
+        title=notification_title,
+        content=notification_content,
+        related_id=approval_id,
+        related_type="approval",
+    )
+
+    db.commit()
+    db.refresh(approval)
+    return approval
+
+
+def transfer_approval(
+    db: Session,
+    approval_id: int,
+    node_record_id: int,
+    target_user_id: int,
+    reason: str | None,
+    operator: User,
+) -> Approval:
+    from app.auth import get_user_display_name
+
+    approval = get_approval(db, approval_id, operator)
+    if approval.status != ApprovalStatus.PENDING:
+        raise HTTPException(status_code=400, detail="审批单已处理，不可转审")
+
+    node_record = _get_node_record(db, node_record_id)
+    if node_record.approval_id != approval_id:
+        raise HTTPException(status_code=400, detail="节点记录不属于该审批单")
+
+    if node_record.level != approval.current_level:
+        raise HTTPException(status_code=400, detail="只能对当前审批节点进行转审")
+
+    if node_record.status != ApprovalStatus.PENDING:
+        raise HTTPException(status_code=400, detail="该节点已处理，不可转审")
+
+    if node_record.transfer_status == TransferStatus.TRANSFERRED:
+        raise HTTPException(status_code=400, detail="该节点已转审，不可重复转审")
+
+    operator_name = get_user_display_name(operator)
+    operator_roles = _get_user_role_codes(db, operator.id)
+
+    is_approver = False
+    if node_record.approver_role in operator_roles:
+        is_approver = True
+
+    if not is_approver and operator_name == node_record.approver_name:
+        is_approver = True
+
+    if "super_admin" in operator_roles or "asset_admin" in operator_roles:
+        is_approver = True
+
+    if not is_approver:
+        active_proxies = (
+            db.query(ApprovalProxy)
+            .filter(
+                ApprovalProxy.proxy_user_id == operator.id,
+                ApprovalProxy.is_active == True,
+                ApprovalProxy.start_time <= datetime.now(),
+                ApprovalProxy.end_time >= datetime.now(),
+            )
+            .all()
+        )
+        for ap in active_proxies:
+            principal = db.query(User).filter(User.id == ap.principal_user_id).first()
+            if principal:
+                principal_role_codes = _get_user_role_codes(db, principal.id)
+                if node_record.approver_role in principal_role_codes:
+                    is_approver = True
+                    break
+
+    if not is_approver:
+        raise HTTPException(status_code=403, detail="您不是该节点的审批人，无法转审")
+
+    target_user = _get_user_by_id(db, target_user_id)
+    target_user_name = get_user_display_name(target_user)
+
+    if target_user_name == operator_name:
+        raise HTTPException(status_code=400, detail="不能转审给自己")
+
+    target_user_roles = _get_user_role_codes(db, target_user_id)
+    if not target_user_roles:
+        raise HTTPException(status_code=400, detail="目标用户没有分配角色，无法审批")
+
+    operator_rank = _get_user_highest_role_rank(db, operator.id)
+    target_rank = _get_user_highest_role_rank(db, target_user_id)
+
+    if target_rank < operator_rank:
+        raise HTTPException(status_code=400, detail="只能转审给同角色或更高角色的人员")
+
+    current_level_records = (
+        db.query(ApprovalNodeRecord)
+        .filter(
+            ApprovalNodeRecord.approval_id == approval_id,
+            ApprovalNodeRecord.level == approval.current_level,
+        )
+        .all()
+    )
+    for record in current_level_records:
+        if record.approver_name == target_user_name and record.status == ApprovalStatus.PENDING:
+            raise HTTPException(status_code=400, detail="该用户已是当前节点的待审批人")
+
+    target_role = max(target_user_roles, key=lambda r: BUILTIN_ROLE_HIERARCHY.get(r, 0))
+
+    now = datetime.now()
+
+    node_record.transfer_status = TransferStatus.TRANSFERRED
+    node_record.transferred_from = operator_name
+    node_record.transferred_to = target_user_name
+    node_record.transfer_reason = reason
+    node_record.record_type = ApprovalRecordType.TRANSFERRED
+    node_record.acted_at = now
+
+    existing_chain_approver = (
+        db.query(ApprovalChainNodeApprover)
+        .filter(
+            ApprovalChainNodeApprover.chain_node_id == node_record.chain_node_id,
+            ApprovalChainNodeApprover.approver_name == target_user_name,
+        )
+        .first()
+    )
+    chain_node_approver_id = existing_chain_approver.id if existing_chain_approver else None
+
+    new_record = ApprovalNodeRecord(
+        approval_id=approval_id,
+        chain_node_id=node_record.chain_node_id,
+        chain_node_approver_id=chain_node_approver_id,
+        level=approval.current_level,
+        chain_node_level=node_record.chain_node_level,
+        approver_role=target_role,
+        approver_name=target_user_name,
+        status=ApprovalStatus.PENDING,
+        record_type=ApprovalRecordType.TRANSFERRED,
+        transferred_from=operator_name,
+        transfer_reason=reason,
+        source_record_id=node_record.id,
+    )
+    db.add(new_record)
+    db.flush()
+
+    action = ApprovalNodeAction(
+        approval_id=approval_id,
+        node_record_id=node_record_id,
+        level=approval.current_level,
+        action_type=ApprovalNodeActionType.TRANSFER,
+        operator=operator_name,
+        operator_id=operator.id,
+        target_user=target_user_name,
+        target_user_id=target_user_id,
+        target_role=target_role,
+        reason=reason,
+    )
+    db.add(action)
+
+    op_log = OperationLog(
+        module="approval",
+        action="transfer",
+        operator=operator_name,
+        operator_id=operator.id,
+        target_type="approval",
+        target_id=approval_id,
+        detail=f"转审：将第{approval.current_level}级节点审批权从 {operator_name} 转交给 {target_user_name}（角色：{target_role}）。原因：{reason or '无'}",
+    )
+    db.add(op_log)
+
+    asset = get_asset(db, approval.asset_id)
+    log = AssetLog(
+        asset_id=asset.id,
+        action="审批转审",
+        operator=operator_name,
+        operator_id=operator.id,
+        detail=f"第{approval.current_level}级节点转审：从 {operator_name} 转交给 {target_user_name}（角色：{target_role}）。原因：{reason or '无'}",
+    )
+    db.add(log)
+
+    action_type = "领用" if approval.approval_type == ApprovalType.ALLOCATE else "报废"
+    notification_title = f"审批转审通知：{action_type}申请"
+    notification_content = (
+        f"{operator_name} 将 {action_type}审批单（#{approval.id}）的第{approval.current_level}级审批权转交给您，"
+        f"请尽快处理。"
+    )
+    if reason:
+        notification_content += f"\n转审原因：{reason}"
+    _create_notification(
+        db,
+        user_id=target_user_id,
+        notification_type=NotificationType.APPROVAL_SUBMITTED,
+        title=notification_title,
+        content=notification_content,
+        related_id=approval_id,
+        related_type="approval",
+    )
+
+    db.commit()
+    db.refresh(approval)
+    return approval
+
+
+def build_approval_timeline(
+    db: Session,
+    approval_id: int,
+) -> list[ApprovalTimelineEvent]:
+    from app.auth import get_user_display_name
+
+    approval = get_approval(db, approval_id)
+    node_records = get_approval_node_records(db, approval_id)
+    node_actions = get_approval_node_actions(db, approval_id)
+    reminders = get_approval_reminders(db, approval_id)
+
+    events: list[ApprovalTimelineEvent] = []
+
+    events.append(
+        ApprovalTimelineEvent(
+            id=f"submit-{approval.id}",
+            event_type="submit",
+            event_type_cn="提交申请",
+            operator=approval.applicant,
+            level=1,
+            reason=approval.reason,
+            created_at=approval.created_at,
+        )
+    )
+
+    all_items = []
+
+    for record in node_records:
+        all_items.append({
+            "type": "record",
+            "data": record,
+            "time": record.acted_at or record.created_at,
+        })
+
+    for action in node_actions:
+        all_items.append({
+            "type": "action",
+            "data": action,
+            "time": action.created_at,
+        })
+
+    for reminder in reminders:
+        all_items.append({
+            "type": "reminder",
+            "data": reminder,
+            "time": reminder.created_at,
+        })
+
+    all_items.sort(key=lambda x: x["time"])
+
+    for item in all_items:
+        if item["type"] == "record":
+            record = item["data"]
+            if record.record_type == ApprovalRecordType.ADDED_SIGNER:
+                events.append(
+                    ApprovalTimelineEvent(
+                        id=f"add-signer-{record.id}",
+                        event_type="add_signer",
+                        event_type_cn="会签加签",
+                        operator=record.added_signer_by or "系统",
+                        target_user=record.approver_name,
+                        target_role=record.approver_role,
+                        level=record.level,
+                        reason=record.added_signer_reason,
+                        created_at=record.created_at,
+                    )
+                )
+                if record.acted_at:
+                    status_cn = {
+                        ApprovalStatus.APPROVED: "通过",
+                        ApprovalStatus.REJECTED: "驳回",
+                    }.get(record.status, record.status.value)
+                    events.append(
+                        ApprovalTimelineEvent(
+                            id=f"approve-{record.id}",
+                            event_type="approve" if record.status == ApprovalStatus.APPROVED else "reject",
+                            event_type_cn=f"加签人审批{status_cn}",
+                            operator=record.approver_name,
+                            level=record.level,
+                            opinion=record.opinion,
+                            status=record.status.value,
+                            created_at=record.acted_at,
+                        )
+                    )
+            elif record.record_type == ApprovalRecordType.TRANSFERRED and record.source_record_id:
+                if record.acted_at and record.transfer_status != TransferStatus.TRANSFERRED:
+                    status_cn = {
+                        ApprovalStatus.APPROVED: "通过",
+                        ApprovalStatus.REJECTED: "驳回",
+                    }.get(record.status, record.status.value)
+                    events.append(
+                        ApprovalTimelineEvent(
+                            id=f"approve-{record.id}",
+                            event_type="approve" if record.status == ApprovalStatus.APPROVED else "reject",
+                            event_type_cn=f"转审接收人审批{status_cn}",
+                            operator=record.approver_name,
+                            level=record.level,
+                            opinion=record.opinion,
+                            status=record.status.value,
+                            created_at=record.acted_at,
+                        )
+                    )
+            elif record.acted_at and record.transfer_status != TransferStatus.TRANSFERRED:
+                status_cn = {
+                    ApprovalStatus.APPROVED: "通过",
+                    ApprovalStatus.REJECTED: "驳回",
+                    ApprovalStatus.WITHDRAWN: "已撤回",
+                    ApprovalStatus.ESCALATED: "已升级",
+                }.get(record.status, record.status.value)
+
+                event_type = "approve" if record.status == ApprovalStatus.APPROVED else "reject"
+                event_type_cn = f"审批{status_cn}"
+
+                if record.proxy_source:
+                    event_type_cn = f"代理审批{status_cn}"
+
+                if record.is_escalated:
+                    event_type_cn = f"超时升级{status_cn}"
+
+                events.append(
+                    ApprovalTimelineEvent(
+                        id=f"approve-{record.id}",
+                        event_type=event_type,
+                        event_type_cn=event_type_cn,
+                        operator=record.actual_approver or record.approver_name,
+                        target_user=record.proxy_source,
+                        level=record.level,
+                        opinion=record.opinion,
+                        status=record.status.value,
+                        created_at=record.acted_at,
+                    )
+                )
+
+        elif item["type"] == "action":
+            action = item["data"]
+            if action.action_type == ApprovalNodeActionType.ADD_SIGNER:
+                pass
+            elif action.action_type == ApprovalNodeActionType.TRANSFER:
+                events.append(
+                    ApprovalTimelineEvent(
+                        id=f"transfer-{action.id}",
+                        event_type="transfer",
+                        event_type_cn="转审",
+                        operator=action.operator,
+                        operator_id=action.operator_id,
+                        target_user=action.target_user,
+                        target_role=action.target_role,
+                        level=action.level,
+                        reason=action.reason,
+                        created_at=action.created_at,
+                    )
+                )
+
+        elif item["type"] == "reminder":
+            reminder = item["data"]
+            events.append(
+                ApprovalTimelineEvent(
+                    id=f"reminder-{reminder.id}",
+                    event_type="reminder",
+                    event_type_cn="催办",
+                    operator=reminder.reminder_by,
+                    operator_id=reminder.reminder_by_id,
+                    level=reminder.level,
+                    reason=reminder.message,
+                    created_at=reminder.created_at,
+                )
+            )
+
+    if approval.status in (ApprovalStatus.APPROVED, ApprovalStatus.REJECTED):
+        status_cn = "审批完成" if approval.status == ApprovalStatus.APPROVED else "审批驳回"
+        events.append(
+            ApprovalTimelineEvent(
+                id=f"complete-{approval.id}",
+                event_type="complete",
+                event_type_cn=status_cn,
+                operator=approval.approver or "系统",
+                opinion=approval.approval_opinion,
+                status=approval.status.value,
+                created_at=approval.updated_at,
+            )
+        )
+    elif approval.status == ApprovalStatus.WITHDRAWN:
+        events.append(
+            ApprovalTimelineEvent(
+                id=f"withdraw-{approval.id}",
+                event_type="withdraw",
+                event_type_cn="审批撤回",
+                operator=approval.applicant,
+                reason=approval.approval_opinion,
+                status=approval.status.value,
+                created_at=approval.updated_at,
+            )
+        )
+
+    return events
 
 
 def _save_node_conditions(

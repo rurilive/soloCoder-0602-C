@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field, EmailStr, field_validator
 from app.models import (
     AssetStatus, AssetCategory, ApprovalType, ApprovalStatus, NotificationType, ApprovalMode,
     ConditionOperator, ConditionField, ConditionLogic,
+    ApprovalNodeActionType, ApprovalRecordType, TransferStatus,
 )
 
 
@@ -148,6 +149,18 @@ class ApprovalRemindRequest(BaseModel):
     message: str | None = Field(None, max_length=500)
 
 
+class ApprovalAddSignerRequest(BaseModel):
+    node_record_id: int
+    target_user_id: int
+    reason: str | None = Field(None, max_length=500)
+
+
+class ApprovalTransferRequest(BaseModel):
+    node_record_id: int
+    target_user_id: int
+    reason: str | None = Field(None, max_length=500)
+
+
 class ApprovalResponse(BaseModel):
     id: int
     asset_id: int
@@ -186,6 +199,15 @@ class ApprovalNodeRecordResponse(BaseModel):
     is_escalated: bool = False
     actual_approver: str | None = None
     proxy_source: str | None = None
+    record_type: ApprovalRecordType = ApprovalRecordType.NORMAL
+    is_added_signer: bool = False
+    added_signer_by: str | None = None
+    added_signer_reason: str | None = None
+    transfer_status: TransferStatus | None = None
+    transferred_from: str | None = None
+    transferred_to: str | None = None
+    transfer_reason: str | None = None
+    source_record_id: int | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -202,12 +224,46 @@ class ApprovalReminderResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ApprovalNodeActionResponse(BaseModel):
+    id: int
+    approval_id: int
+    node_record_id: int
+    level: int
+    action_type: ApprovalNodeActionType
+    operator: str
+    operator_id: int | None = None
+    target_user: str
+    target_user_id: int | None = None
+    target_role: str
+    reason: str | None = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ApprovalTimelineEvent(BaseModel):
+    id: str
+    event_type: str
+    event_type_cn: str
+    operator: str
+    operator_id: int | None = None
+    target_user: str | None = None
+    target_role: str | None = None
+    level: int | None = None
+    opinion: str | None = None
+    reason: str | None = None
+    status: str | None = None
+    created_at: datetime
+
+
 class ApprovalDetailResponse(ApprovalResponse):
     asset_name: str | None = None
     asset_tag: str | None = None
     purchase_price: float | None = None
     node_records: list[ApprovalNodeRecordResponse] = []
     reminders: list[ApprovalReminderResponse] = []
+    node_actions: list[ApprovalNodeActionResponse] = []
+    timeline: list[ApprovalTimelineEvent] = []
 
 
 class ApprovalListResponse(BaseModel):

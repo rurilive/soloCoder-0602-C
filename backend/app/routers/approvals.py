@@ -19,6 +19,8 @@ from app.schemas import (
     ApprovalProxyListResponse,
     ApprovalWithdrawRequest,
     ApprovalRemindRequest,
+    ApprovalAddSignerRequest,
+    ApprovalTransferRequest,
 )
 from app import crud
 
@@ -311,12 +313,16 @@ def get_approval(
     asset = crud.get_asset(db, approval.asset_id, current_user)
     node_records = crud.get_approval_node_records(db, approval.id)
     reminders = crud.get_approval_reminders(db, approval.id)
+    node_actions = crud.get_approval_node_actions(db, approval.id)
+    timeline = crud.build_approval_timeline(db, approval.id)
     result = ApprovalDetailResponse.model_validate(approval)
     result.asset_name = asset.name
     result.asset_tag = asset.asset_tag
     result.purchase_price = asset.purchase_price
     result.node_records = node_records
     result.reminders = reminders
+    result.node_actions = node_actions
+    result.timeline = timeline
     return result
 
 
@@ -410,6 +416,66 @@ def remind_approval(
         target_type="approval",
         target_id=approval_id,
         detail=f"催办审批, 留言: {data.message or '无'}",
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    return approval
+
+
+@router.post("/{approval_id}/add-signer", response_model=ApprovalResponse)
+def add_approval_signer(
+    request: Request,
+    approval_id: int,
+    data: ApprovalAddSignerRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permissions("approval:add_signer")),
+):
+    from app.auth import get_user_display_name
+
+    target_user = db.query(User).filter(User.id == data.target_user_id).first()
+    target_user_name = get_user_display_name(target_user) if target_user else "未知用户"
+
+    approval = crud.add_approval_signer(
+        db, approval_id, data.node_record_id, data.target_user_id, data.reason, current_user
+    )
+    log_operation(
+        db,
+        module="approval",
+        action="add_signer",
+        user=current_user,
+        target_type="approval",
+        target_id=approval_id,
+        detail=f"会签加签, 追加审批人: {target_user_name}, 原因: {data.reason or '无'}",
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    return approval
+
+
+@router.post("/{approval_id}/transfer", response_model=ApprovalResponse)
+def transfer_approval(
+    request: Request,
+    approval_id: int,
+    data: ApprovalTransferRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permissions("approval:transfer")),
+):
+    from app.auth import get_user_display_name
+
+    target_user = db.query(User).filter(User.id == data.target_user_id).first()
+    target_user_name = get_user_display_name(target_user) if target_user else "未知用户"
+
+    approval = crud.transfer_approval(
+        db, approval_id, data.node_record_id, data.target_user_id, data.reason, current_user
+    )
+    log_operation(
+        db,
+        module="approval",
+        action="transfer",
+        user=current_user,
+        target_type="approval",
+        target_id=approval_id,
+        detail=f"审批转审, 转交给: {target_user_name}, 原因: {data.reason or '无'}",
         ip_address=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
     )

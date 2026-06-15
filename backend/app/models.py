@@ -56,6 +56,22 @@ class ApprovalMode(str, enum.Enum):
     OR_SIGN = "or_sign"
 
 
+class ApprovalNodeActionType(str, enum.Enum):
+    ADD_SIGNER = "add_signer"
+    TRANSFER = "transfer"
+
+
+class ApprovalRecordType(str, enum.Enum):
+    NORMAL = "normal"
+    ADDED_SIGNER = "added_signer"
+    TRANSFERRED = "transferred"
+
+
+class TransferStatus(str, enum.Enum):
+    PENDING = "pending"
+    TRANSFERRED = "transferred"
+
+
 class NotificationType(str, enum.Enum):
     APPROVAL_REMINDER = "approval_reminder"
     APPROVAL_SUBMITTED = "approval_submitted"
@@ -191,7 +207,18 @@ class ApprovalNodeRecord(Base):
     is_escalated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     actual_approver: Mapped[str | None] = mapped_column(String(128), nullable=True)
     proxy_source: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    record_type: Mapped[ApprovalRecordType] = mapped_column(Enum(ApprovalRecordType), default=ApprovalRecordType.NORMAL, nullable=False)
+    is_added_signer: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    added_signer_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    added_signer_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    transfer_status: Mapped[TransferStatus | None] = mapped_column(Enum(TransferStatus), nullable=True)
+    transferred_from: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    transferred_to: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    transfer_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_record_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("approval_node_records.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
+
+    source_record: Mapped["ApprovalNodeRecord | None"] = relationship("ApprovalNodeRecord", remote_side=[id])
 
 
 class Approval(Base):
@@ -239,6 +266,23 @@ class ApprovalReminder(Base):
     reminder_by: Mapped[str] = mapped_column(String(128), nullable=False)
     reminder_by_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
     message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
+
+
+class ApprovalNodeAction(Base):
+    __tablename__ = "approval_node_actions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    approval_id: Mapped[int] = mapped_column(Integer, ForeignKey("approvals.id"), nullable=False, index=True)
+    node_record_id: Mapped[int] = mapped_column(Integer, ForeignKey("approval_node_records.id"), nullable=False, index=True)
+    level: Mapped[int] = mapped_column(Integer, nullable=False)
+    action_type: Mapped[ApprovalNodeActionType] = mapped_column(Enum(ApprovalNodeActionType), nullable=False)
+    operator: Mapped[str] = mapped_column(String(128), nullable=False)
+    operator_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+    target_user: Mapped[str] = mapped_column(String(128), nullable=False)
+    target_user_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+    target_role: Mapped[str] = mapped_column(String(64), nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
 
 
@@ -392,6 +436,8 @@ DEFAULT_PERMISSIONS: list[dict] = [
     {"code": "approval:submit", "name": "提交审批", "module": "approval", "description": "提交审批申请"},
     {"code": "approval:approve", "name": "审批通过", "module": "approval", "description": "通过待审批单据"},
     {"code": "approval:reject", "name": "审批驳回", "module": "approval", "description": "驳回待审批单据"},
+    {"code": "approval:add_signer", "name": "会签加签", "module": "approval", "description": "在会签节点追加临时审批人"},
+    {"code": "approval:transfer", "name": "转审", "module": "approval", "description": "将待审批单据转交给他人审批"},
 
     {"code": "chain:view", "name": "查看审批链", "module": "chain", "description": "查看审批链配置"},
     {"code": "chain:manage", "name": "管理审批链", "module": "chain", "description": "创建、修改、删除审批链"},
@@ -431,6 +477,7 @@ DEFAULT_ROLES: list[dict] = [
             "asset:allocate", "asset:return", "asset:scrap",
             "asset:import", "asset:export",
             "approval:view", "approval:submit", "approval:approve", "approval:reject",
+            "approval:add_signer", "approval:transfer",
             "chain:view", "chain:manage",
             "proxy:manage", "proxy:view",
             "log:view",
@@ -444,6 +491,7 @@ DEFAULT_ROLES: list[dict] = [
         "permissions": [
             "asset:view",
             "approval:view", "approval:approve", "approval:reject",
+            "approval:add_signer", "approval:transfer",
             "proxy:manage", "proxy:view",
         ],
     },
@@ -455,6 +503,7 @@ DEFAULT_ROLES: list[dict] = [
         "permissions": [
             "asset:view", "asset:export",
             "approval:view", "approval:approve", "approval:reject",
+            "approval:add_signer", "approval:transfer",
             "proxy:manage", "proxy:view",
             "log:view",
         ],
