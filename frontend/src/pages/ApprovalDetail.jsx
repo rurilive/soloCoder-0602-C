@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { getApproval, approveApproval, rejectApproval, addSigner, transferApproval, getUsers } from '../api/assets'
+import { getApproval, approveApproval, rejectApproval, addSigner, transferApproval, getAvailableApprovalUsers } from '../api/assets'
 
 const STATUS_MAP = {
   pending: '待审批',
@@ -644,11 +644,14 @@ export default function ApprovalDetail() {
           })
           if (res.ok) {
             const profile = await res.json()
+            const roleCodes = Array.isArray(profile.roles)
+              ? profile.roles.map(r => (typeof r === 'string' ? r : r.code)).filter(Boolean)
+              : []
             setCurrentUser({
               id: profile.id,
               username: profile.username,
               real_name: profile.real_name || profile.username,
-              roles: profile.roles || [],
+              roles: roleCodes,
             })
             return
           }
@@ -711,7 +714,7 @@ export default function ApprovalDetail() {
         (r) => r.status === 'pending' && r.transfer_status !== 'transferred'
       )
       setPendingRecordsForAddSigner(pendingRecords)
-      const res = await getUsers({ page_size: 100, is_active: true })
+      const res = await getAvailableApprovalUsers()
       setAvailableUsers(res.data.items || res.data || [])
       setShowAddSignerModal(true)
     } finally {
@@ -741,7 +744,7 @@ export default function ApprovalDetail() {
     try {
       setModalLoading(true)
       setTransferTargetRecord(record)
-      const res = await getUsers({ page_size: 100, is_active: true })
+      const res = await getAvailableApprovalUsers()
       setAvailableUsers(res.data.items || res.data || [])
       setShowTransferModal(true)
     } finally {

@@ -465,6 +465,21 @@ class RoleBrief(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class UserBrief(BaseModel):
+    id: int
+    username: str
+    real_name: str | None
+    department: str | None
+    position: str | None
+
+    model_config = {"from_attributes": True}
+
+
+class UserBriefListResponse(BaseModel):
+    total: int
+    items: list[UserBrief] = []
+
+
 class RoleResponse(BaseModel):
     id: int
     name: str

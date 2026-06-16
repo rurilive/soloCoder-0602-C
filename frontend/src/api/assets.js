@@ -33,6 +33,7 @@ export const addSigner = (id, data) => api.post(`/approvals/${id}/add-signer`, d
 export const transferApproval = (id, data) => api.post(`/approvals/${id}/transfer`, data)
 
 export const getUsers = (params) => api.get('/users', { params })
+export const getAvailableApprovalUsers = (params) => api.get('/approvals/available-users', { params })
 
 export const getApprovalChains = (params) => api.get('/approvals/chains/list', { params })
 export const getApprovalChain = (id) => api.get(`/approvals/chains/${id}`)

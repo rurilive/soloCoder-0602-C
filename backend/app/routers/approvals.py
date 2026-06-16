@@ -21,10 +21,39 @@ from app.schemas import (
     ApprovalRemindRequest,
     ApprovalAddSignerRequest,
     ApprovalTransferRequest,
+    UserBriefListResponse,
 )
 from app import crud
 
 router = APIRouter(prefix="/api/approvals", tags=["approvals"])
+
+
+@router.get("/available-users", response_model=UserBriefListResponse)
+def list_available_users(
+    keyword: str | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    from app.crud import _get_user_highest_role_rank
+
+    query = db.query(User).filter(User.is_active == True)
+    if keyword:
+        like = f"%{keyword}%"
+        query = query.filter(
+            (User.username.like(like))
+            | (User.real_name.like(like))
+            | (User.email.like(like))
+        )
+    total = query.count()
+    users = query.order_by(User.id.asc()).all()
+
+    operator_rank = _get_user_highest_role_rank(db, current_user.id)
+    result = []
+    for u in users:
+        target_rank = _get_user_highest_role_rank(db, u.id)
+        if target_rank >= operator_rank:
+            result.append(u)
+    return UserBriefListResponse(total=len(result), items=result)
 
 
 @router.get("/chains/list", response_model=ApprovalChainListResponse)
@@ -240,7 +269,7 @@ def list_approvals(
     items, total = crud.get_approvals(db, status, approval_type, keyword, page, page_size, current_user)
     result = []
     for approval in items:
-        asset = crud.get_asset(db, approval.asset_id, current_user)
+        asset = crud.get_asset(db, approval.asset_id, None)
         node_records = crud.get_approval_node_records(db, approval.id)
         approval_data = ApprovalDetailResponse.model_validate(approval)
         approval_data.asset_name = asset.name
@@ -266,7 +295,7 @@ def list_my_pending_approvals(
     )
     result = []
     for approval in items:
-        asset = crud.get_asset(db, approval.asset_id, current_user)
+        asset = crud.get_asset(db, approval.asset_id, None)
         node_records = crud.get_approval_node_records(db, approval.id)
         approval_data = ApprovalDetailResponse.model_validate(approval)
         approval_data.asset_name = asset.name
@@ -292,7 +321,7 @@ def list_my_submitted_approvals(
     )
     result = []
     for approval in items:
-        asset = crud.get_asset(db, approval.asset_id, current_user)
+        asset = crud.get_asset(db, approval.asset_id, None)
         node_records = crud.get_approval_node_records(db, approval.id)
         approval_data = ApprovalDetailResponse.model_validate(approval)
         approval_data.asset_name = asset.name
@@ -310,7 +339,7 @@ def get_approval(
     current_user: User = Depends(require_permissions("approval:view")),
 ):
     approval = crud.get_approval(db, approval_id, current_user)
-    asset = crud.get_asset(db, approval.asset_id, current_user)
+    asset = crud.get_asset(db, approval.asset_id, None)
     node_records = crud.get_approval_node_records(db, approval.id)
     reminders = crud.get_approval_reminders(db, approval.id)
     node_actions = crud.get_approval_node_actions(db, approval.id)

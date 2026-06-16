@@ -2057,6 +2057,85 @@ def transfer_approval(
         related_type="approval",
     )
 
+    node_mode = _get_node_mode(db, node_record.chain_node_id)
+    level_complete = False
+
+    updated_level_records = (
+        db.query(ApprovalNodeRecord)
+        .filter(
+            ApprovalNodeRecord.approval_id == approval_id,
+            ApprovalNodeRecord.level == approval.current_level,
+        )
+        .all()
+    )
+    active_records = _filter_active_records(updated_level_records)
+
+    if node_mode == ApprovalMode.SINGLE:
+        level_complete = True
+    elif node_mode == ApprovalMode.ALL_SIGN:
+        all_approved = all(
+            r.status == ApprovalStatus.APPROVED for r in active_records
+        )
+        level_complete = all_approved
+    elif node_mode == ApprovalMode.OR_SIGN:
+        any_approved = any(
+            r.status == ApprovalStatus.APPROVED for r in active_records
+        )
+        if any_approved:
+            for r in active_records:
+                if r.status == ApprovalStatus.PENDING:
+                    r.status = ApprovalStatus.APPROVED
+                    r.opinion = "或签模式自动通过"
+                    r.acted_at = now
+            level_complete = True
+
+    next_level = _get_next_record_level(db, approval_id, approval.current_level)
+
+    if level_complete and next_level is not None:
+        approval.current_level = next_level
+        _set_next_level_timeout(db, approval, "transfer_approval")
+
+        mode_desc = {
+            ApprovalMode.SINGLE: "单人审批",
+            ApprovalMode.ALL_SIGN: "会签",
+            ApprovalMode.OR_SIGN: "或签",
+        }.get(node_mode, "审批")
+
+        level_desc = f"第{approval.current_level - 1}/{approval.total_levels}级{mode_desc}通过"
+        level_log = AssetLog(
+            asset_id=asset.id,
+            action="多级审批通过",
+            operator=operator_name,
+            operator_id=operator.id,
+            detail=f"{level_desc}，转审人: {operator_name}，转审给: {target_user_name}。原因：{reason or '无'}",
+        )
+        db.add(level_log)
+
+    if level_complete and next_level is None:
+        approval.status = ApprovalStatus.APPROVED
+        approval.approver = operator_name
+        approval.approval_opinion = f"转审后全员通过。原因：{reason or '无'}"
+
+        if approval.approval_type == ApprovalType.ALLOCATE:
+            asset.status = AssetStatus.ALLOCATED
+            asset.assignee = approval.assignee
+            final_action = "领用审批通过"
+            final_detail = f"审批通过，领用人: {approval.assignee}。"
+        elif approval.approval_type == ApprovalType.SCRAP:
+            asset.status = AssetStatus.SCRAPPED
+            asset.assignee = None
+            final_action = "报废审批通过"
+            final_detail = "审批通过。"
+
+        final_log = AssetLog(
+            asset_id=asset.id,
+            action=final_action,
+            operator=operator_name,
+            operator_id=operator.id,
+            detail=final_detail,
+        )
+        db.add(final_log)
+
     db.commit()
     db.refresh(approval)
     return approval
