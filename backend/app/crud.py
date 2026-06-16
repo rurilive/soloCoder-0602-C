@@ -2070,9 +2070,7 @@ def transfer_approval(
     )
     active_records = _filter_active_records(updated_level_records)
 
-    if node_mode == ApprovalMode.SINGLE:
-        level_complete = True
-    elif node_mode == ApprovalMode.ALL_SIGN:
+    if node_mode == ApprovalMode.ALL_SIGN:
         all_approved = all(
             r.status == ApprovalStatus.APPROVED for r in active_records
         )

@@ -1,8 +1,9 @@
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
+from sqlalchemy import select, func, and_
 from app.database import get_db
 from app.auth import get_current_user, require_permissions, log_operation
-from app.models import ApprovalStatus, ApprovalType, User
+from app.models import ApprovalStatus, ApprovalType, User, UserRole, Role
 from app.schemas import (
     ApprovalCreate,
     ApprovalAction,
@@ -34,26 +35,52 @@ def list_available_users(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    from app.crud import _get_user_highest_role_rank
+    from app.crud import BUILTIN_ROLE_HIERARCHY
+    from sqlalchemy import case
 
-    query = db.query(User).filter(User.is_active == True)
+    rank_expr = func.max(
+        case(
+            *[(Role.code == code, rank) for code, rank in BUILTIN_ROLE_HIERARCHY.items()],
+            else_=0,
+        )
+    ).label("max_rank")
+
+    user_rank_subq = (
+        select(UserRole.user_id.label("user_id"), rank_expr)
+        .join(Role, Role.id == UserRole.role_id)
+        .group_by(UserRole.user_id)
+        .subquery()
+    )
+
+    base_query = (
+        db.query(User)
+        .outerjoin(user_rank_subq, user_rank_subq.c.user_id == User.id)
+        .filter(User.is_active == True)
+    )
+
     if keyword:
         like = f"%{keyword}%"
-        query = query.filter(
+        base_query = base_query.filter(
             (User.username.like(like))
             | (User.real_name.like(like))
             | (User.email.like(like))
         )
-    total = query.count()
-    users = query.order_by(User.id.asc()).all()
 
-    operator_rank = _get_user_highest_role_rank(db, current_user.id)
-    result = []
-    for u in users:
-        target_rank = _get_user_highest_role_rank(db, u.id)
-        if target_rank >= operator_rank:
-            result.append(u)
-    return UserBriefListResponse(total=len(result), items=result)
+    operator_rank = (
+        db.query(func.coalesce(user_rank_subq.c.max_rank, 0))
+        .select_from(User)
+        .outerjoin(user_rank_subq, user_rank_subq.c.user_id == User.id)
+        .filter(User.id == current_user.id)
+        .scalar()
+    ) or 0
+
+    filtered = (
+        base_query
+        .filter(func.coalesce(user_rank_subq.c.max_rank, 0) >= operator_rank)
+        .order_by(User.id.asc())
+        .all()
+    )
+    return UserBriefListResponse(total=len(filtered), items=filtered)
 
 
 @router.get("/chains/list", response_model=ApprovalChainListResponse)
