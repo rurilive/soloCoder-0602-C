@@ -489,13 +489,24 @@ def _get_user_role_codes(db: Session, user_id: int) -> set[str]:
     return {r.code for r in roles}
 
 
-def _user_is_approver_for_node(db: Session, user_id: int, node_record: ApprovalNodeRecord) -> bool:
+def _user_is_approver_for_node(db: Session, user_id: int, node_record: ApprovalNodeRecord) -> tuple[bool, bool]:
+    """
+    返回 (是否是审批人, 是否是精确匹配（按名字匹配优先于按角色匹配）
+    """
     if user_id is None:
-        return False
+        return False, False
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        return False, False
+    user_name = user.real_name or user.username
+    if node_record.approver_name == user_name:
+        return True, True
     user_role_codes = _get_user_role_codes(db, user_id)
     if "super_admin" in user_role_codes or "asset_admin" in user_role_codes:
-        return True
-    return node_record.approver_role in user_role_codes
+        return True, False
+    if node_record.approver_role in user_role_codes:
+        return True, False
+    return False, False
 
 
 def _get_applicant_department(db: Session, applicant_name: str) -> str | None:
@@ -709,6 +720,7 @@ def get_approval(db: Session, approval_id: int, current_user: User | None = None
                 .filter(
                     ApprovalNodeRecord.approval_id == approval_id,
                     ApprovalNodeRecord.status == ApprovalStatus.PENDING,
+                    ApprovalNodeRecord.transfer_status != TransferStatus.TRANSFERRED,
                 )
                 .all()
             )
@@ -739,6 +751,16 @@ def _check_circular_proxy(db: Session, principal_user_id: int, proxy_user_id: in
     return False
 
 
+def _is_active_record(record: ApprovalNodeRecord) -> bool:
+    if record.transfer_status and record.transfer_status == TransferStatus.TRANSFERRED:
+        return False
+    return True
+
+
+def _filter_active_records(records: list[ApprovalNodeRecord]) -> list[ApprovalNodeRecord]:
+    return [r for r in records if _is_active_record(r)]
+
+
 def _get_node_mode(db: Session, chain_node_id: int) -> ApprovalMode:
     chain_node = db.query(ApprovalChainNode).filter(ApprovalChainNode.id == chain_node_id).first()
     if not chain_node:
@@ -753,6 +775,7 @@ def _set_next_level_timeout(db: Session, approval: Approval, context: str = "unk
             ApprovalNodeRecord.approval_id == approval.id,
             ApprovalNodeRecord.level == approval.current_level,
             ApprovalNodeRecord.status == ApprovalStatus.PENDING,
+            ApprovalNodeRecord.transfer_status != TransferStatus.TRANSFERRED,
         )
         .all()
     )
@@ -850,19 +873,32 @@ def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approv
     is_direct_approver = False
     is_proxy_approver = False
     proxy_principal_name = None
+    fuzzy_match_candidate = None
 
     for record in current_level_records:
         if record.status != ApprovalStatus.PENDING:
             continue
+        if record.transfer_status and record.transfer_status == TransferStatus.TRANSFERRED:
+            continue
 
-        if approver and _user_is_approver_for_node(db, approver.id, record):
-            pending_record = record
-            is_direct_approver = True
-            break
+        if approver:
+            is_approver, is_exact = _user_is_approver_for_node(db, approver.id, record)
+            if is_approver and is_exact:
+                pending_record = record
+                is_direct_approver = True
+                break
+            elif is_approver and not is_exact and fuzzy_match_candidate is None:
+                fuzzy_match_candidate = record
+
+    if not pending_record and fuzzy_match_candidate:
+        pending_record = fuzzy_match_candidate
+        is_direct_approver = True
 
     if not pending_record and approver:
         for record in current_level_records:
             if record.status != ApprovalStatus.PENDING:
+                continue
+            if record.transfer_status and record.transfer_status == TransferStatus.TRANSFERRED:
                 continue
 
             active_proxies = (
@@ -911,19 +947,20 @@ def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approv
         pending_record.proxy_source = proxy_principal_name
 
     level_complete = False
+    active_records = _filter_active_records(current_level_records)
     if node_mode == ApprovalMode.SINGLE:
         level_complete = True
     elif node_mode == ApprovalMode.ALL_SIGN:
         all_approved = all(
-            r.status == ApprovalStatus.APPROVED for r in current_level_records
+            r.status == ApprovalStatus.APPROVED for r in active_records
         )
         level_complete = all_approved
     elif node_mode == ApprovalMode.OR_SIGN:
         any_approved = any(
-            r.status == ApprovalStatus.APPROVED for r in current_level_records
+            r.status == ApprovalStatus.APPROVED for r in active_records
         )
         if any_approved:
-            for r in current_level_records:
+            for r in active_records:
                 if r.status == ApprovalStatus.PENDING:
                     r.status = ApprovalStatus.APPROVED
                     r.opinion = "或签模式自动通过"
@@ -1022,19 +1059,32 @@ def reject_approval(db: Session, approval_id: int, data: ApprovalAction, approve
     is_direct_approver = False
     is_proxy_approver = False
     proxy_principal_name = None
+    fuzzy_match_candidate = None
 
     for record in current_level_records:
         if record.status != ApprovalStatus.PENDING:
             continue
+        if record.transfer_status and record.transfer_status == TransferStatus.TRANSFERRED:
+            continue
 
-        if approver and _user_is_approver_for_node(db, approver.id, record):
-            pending_record = record
-            is_direct_approver = True
-            break
+        if approver:
+            is_approver, is_exact = _user_is_approver_for_node(db, approver.id, record)
+            if is_approver and is_exact:
+                pending_record = record
+                is_direct_approver = True
+                break
+            elif is_approver and not is_exact and fuzzy_match_candidate is None:
+                fuzzy_match_candidate = record
+
+    if not pending_record and fuzzy_match_candidate:
+        pending_record = fuzzy_match_candidate
+        is_direct_approver = True
 
     if not pending_record and approver:
         for record in current_level_records:
             if record.status != ApprovalStatus.PENDING:
+                continue
+            if record.transfer_status and record.transfer_status == TransferStatus.TRANSFERRED:
                 continue
 
             active_proxies = (
@@ -1267,7 +1317,7 @@ def remind_approval(db: Session, approval_id: int, message: str | None = None, a
     if not current_level_records:
         raise HTTPException(status_code=400, detail="当前审批节点不存在")
 
-    pending_records = [r for r in current_level_records if r.status == ApprovalStatus.PENDING]
+    pending_records = [r for r in current_level_records if r.status == ApprovalStatus.PENDING and r.transfer_status != TransferStatus.TRANSFERRED]
     if not pending_records:
         raise HTTPException(status_code=400, detail="当前节点已处理，不可催办")
 
@@ -1461,6 +1511,7 @@ def _trigger_escalation_by_reminder(
                 ApprovalNodeRecord.approval_id == approval.id,
                 ApprovalNodeRecord.level > current_level,
                 ApprovalNodeRecord.status == ApprovalStatus.PENDING,
+                ApprovalNodeRecord.transfer_status != TransferStatus.TRANSFERRED,
             )
             .all()
         )
@@ -1511,6 +1562,7 @@ def get_my_pending_approvals(
             db.query(ApprovalNodeRecord.approval_id)
             .filter(
                 ApprovalNodeRecord.status == ApprovalStatus.PENDING,
+                ApprovalNodeRecord.transfer_status != TransferStatus.TRANSFERRED,
                 ApprovalNodeRecord.approver_role.in_(list(user_role_codes)) if user_role_codes else ApprovalNodeRecord.approver_role == "__none__",
             )
             .distinct()
@@ -1540,6 +1592,7 @@ def get_my_pending_approvals(
                         db.query(ApprovalNodeRecord.approval_id)
                         .filter(
                             ApprovalNodeRecord.status == ApprovalStatus.PENDING,
+                            ApprovalNodeRecord.transfer_status != TransferStatus.TRANSFERRED,
                             ApprovalNodeRecord.approver_role.in_(list(principal_role_codes)),
                         )
                         .distinct()
@@ -1706,11 +1759,13 @@ def add_approval_signer(
         .all()
     )
 
-    approved_count = sum(1 for r in current_level_records if r.status == ApprovalStatus.APPROVED)
+    active_records = _filter_active_records(current_level_records)
+
+    approved_count = sum(1 for r in active_records if r.status == ApprovalStatus.APPROVED)
     if approved_count == 0:
         raise HTTPException(status_code=400, detail="会签节点尚未有人通过，不可加签")
 
-    all_approved = all(r.status == ApprovalStatus.APPROVED for r in current_level_records)
+    all_approved = all(r.status == ApprovalStatus.APPROVED for r in active_records)
     if all_approved:
         raise HTTPException(status_code=400, detail="会签节点已全员通过，不可加签")
 
@@ -1726,7 +1781,7 @@ def add_approval_signer(
     if not target_user_roles:
         raise HTTPException(status_code=400, detail="目标用户没有分配角色，无法作为审批人")
 
-    for record in current_level_records:
+    for record in active_records:
         if record.approver_name == target_user_name:
             raise HTTPException(status_code=400, detail="该用户已是当前节点的审批人")
 
@@ -1904,7 +1959,8 @@ def transfer_approval(
         )
         .all()
     )
-    for record in current_level_records:
+    active_records = _filter_active_records(current_level_records)
+    for record in active_records:
         if record.approver_name == target_user_name and record.status == ApprovalStatus.PENDING:
             raise HTTPException(status_code=400, detail="该用户已是当前节点的待审批人")
 
@@ -1912,6 +1968,8 @@ def transfer_approval(
 
     now = datetime.now()
 
+    node_record.status = ApprovalStatus.APPROVED
+    node_record.opinion = f"已转审给 {target_user_name}"
     node_record.transfer_status = TransferStatus.TRANSFERRED
     node_record.transferred_from = operator_name
     node_record.transferred_to = target_user_name
@@ -2586,6 +2644,7 @@ def check_and_process_timeouts(db: Session) -> list[dict]:
         db.query(ApprovalNodeRecord)
         .filter(
             ApprovalNodeRecord.status == ApprovalStatus.PENDING,
+            ApprovalNodeRecord.transfer_status != TransferStatus.TRANSFERRED,
             ApprovalNodeRecord.timeout_at.isnot(None),
             ApprovalNodeRecord.timeout_at < now,
         )
@@ -2619,7 +2678,7 @@ def check_and_process_timeouts(db: Session) -> list[dict]:
 
         node_mode = _get_node_mode(db, records[0].chain_node_id)
 
-        pending_records = [r for r in records if r.status == ApprovalStatus.PENDING]
+        pending_records = [r for r in records if r.status == ApprovalStatus.PENDING and r.transfer_status != TransferStatus.TRANSFERRED]
         if not pending_records:
             continue
 
@@ -2707,6 +2766,7 @@ def check_and_process_timeouts(db: Session) -> list[dict]:
                     ApprovalNodeRecord.approval_id == approval.id,
                     ApprovalNodeRecord.level > level,
                     ApprovalNodeRecord.status == ApprovalStatus.PENDING,
+                    ApprovalNodeRecord.transfer_status != TransferStatus.TRANSFERRED,
                 )
                 .all()
             )

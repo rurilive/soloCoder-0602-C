@@ -5,6 +5,14 @@ const api = axios.create({
   timeout: 10000,
 })
 
+api.interceptors.request.use((config) => {
+  const token = localStorage.getItem('token')
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`
+  }
+  return config
+})
+
 export const getAssets = (params) => api.get('/assets', { params })
 export const getAsset = (id) => api.get(`/assets/${id}`)
 export const getAssetByTag = (tag) => api.get(`/assets/tag/${tag}`)
@@ -21,6 +29,10 @@ export const getApproval = (id) => api.get(`/approvals/${id}`)
 export const approveApproval = (id, data) => api.post(`/approvals/${id}/approve`, data)
 export const rejectApproval = (id, data) => api.post(`/approvals/${id}/reject`, data)
 export const createApproval = (assetId, data) => api.post(`/approvals/asset/${assetId}`, data)
+export const addSigner = (id, data) => api.post(`/approvals/${id}/add-signer`, data)
+export const transferApproval = (id, data) => api.post(`/approvals/${id}/transfer`, data)
+
+export const getUsers = (params) => api.get('/users', { params })
 
 export const getApprovalChains = (params) => api.get('/approvals/chains/list', { params })
 export const getApprovalChain = (id) => api.get(`/approvals/chains/${id}`)
