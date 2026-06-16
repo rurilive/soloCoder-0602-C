@@ -638,11 +638,28 @@ export default function ApprovalDetail() {
     try {
       const token = localStorage.getItem('token')
       if (token) {
+        try {
+          const res = await fetch('/api/auth/me', {
+            headers: { 'Authorization': `Bearer ${token}` },
+          })
+          if (res.ok) {
+            const profile = await res.json()
+            setCurrentUser({
+              id: profile.id,
+              username: profile.username,
+              real_name: profile.real_name || profile.username,
+              roles: profile.roles || [],
+            })
+            return
+          }
+        } catch (apiErr) {
+          console.warn('API /me failed, falling back to token parse:', apiErr)
+        }
         const payload = JSON.parse(atob(token.split('.')[1]))
         setCurrentUser({
-          id: payload.user_id,
-          username: payload.sub,
-          real_name: payload.real_name || payload.sub,
+          id: payload.user_id || payload.sub,
+          username: payload.username || payload.sub,
+          real_name: payload.real_name || payload.username || payload.sub,
           roles: payload.roles || [],
         })
       }
