@@ -2881,9 +2881,9 @@ def _process_timeouts_internal(db: Session) -> list[dict]:
 
         lock_result = db.execute(
             text(
-                "UPDATE approvals SET processing_lock = :lock_id, updated_at = :now "
+                "UPDATE approvals SET processing_lock = :lock_id, processing_locked_at = :now "
                 "WHERE id = :approval_id AND status = :status AND current_level = :level "
-                "AND (processing_lock IS NULL OR updated_at < :stale_threshold)"
+                "AND (processing_lock IS NULL OR processing_locked_at < :stale_threshold)"
             ),
             {
                 "lock_id": worker_id,
@@ -3025,7 +3025,8 @@ def _process_timeouts_internal(db: Session) -> list[dict]:
 
             db.execute(
                 text(
-                    "UPDATE approvals SET processing_lock = NULL WHERE id = :approval_id AND processing_lock = :lock_id"
+                    "UPDATE approvals SET processing_lock = NULL, processing_locked_at = NULL "
+                    "WHERE id = :approval_id AND processing_lock = :lock_id"
                 ),
                 {"approval_id": approval_id, "lock_id": worker_id},
             )
