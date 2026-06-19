@@ -852,9 +852,10 @@ def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approv
         raise HTTPException(status_code=404, detail="审批单不存在")
 
     if approval.status != ApprovalStatus.PENDING:
-        raise HTTPException(status_code=400, detail="审批单已处理，不可重复操作")
-
-    db.refresh(approval)
+        raise HTTPException(
+            status_code=409,
+            detail="并发冲突：该审批单已被其他审批人处理，请刷新后重试",
+        )
 
     asset = get_asset(db, approval.asset_id)
     if asset.status != AssetStatus.PENDING_APPROVAL:
@@ -1071,9 +1072,10 @@ def reject_approval(db: Session, approval_id: int, data: ApprovalAction, approve
         raise HTTPException(status_code=404, detail="审批单不存在")
 
     if approval.status != ApprovalStatus.PENDING:
-        raise HTTPException(status_code=400, detail="审批单已处理，不可重复操作")
-
-    db.refresh(approval)
+        raise HTTPException(
+            status_code=409,
+            detail="并发冲突：该审批单已被其他审批人处理，请刷新后重试",
+        )
 
     asset = get_asset(db, approval.asset_id)
     if asset.status != AssetStatus.PENDING_APPROVAL:

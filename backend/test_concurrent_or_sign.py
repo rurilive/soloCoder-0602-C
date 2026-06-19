@@ -633,17 +633,16 @@ def test_concurrent_3thread_or_sign_approve():
             else:
                 print("  ✓ 无其他错误")
 
-            if approval.current_level != 2:
-                print(f"  ✗ 级别错误：预期推进到level=2，实际level={approval.current_level}")
+            initial_level = 1
+            if approval.current_level != initial_level + 1:
+                print(f"  ✗ 级别错误：预期推进到level={initial_level + 1}，实际level={approval.current_level}")
                 passed = False
             else:
-                print("  ✓ 级别正确：从level=1推进到level=2")
+                print(f"  ✓ 级别正确：从level={initial_level}推进到level={initial_level + 1}")
 
-            if approval.current_level > 2:
-                print(f"  ✗ 跳级现象：从level=1跳到level={approval.current_level}")
+            if approval.current_level - initial_level > 1:
+                print(f"  ✗ 跳级现象：一次推进了{approval.current_level - initial_level}级，从level={initial_level}跳到level={approval.current_level}")
                 passed = False
-            else:
-                print("  ✓ 无跳级现象")
 
             l1_records = [r for r in records if r.level == 1]
             l1_approved = [r for r in l1_records if r.status == ApprovalStatus.APPROVED]
