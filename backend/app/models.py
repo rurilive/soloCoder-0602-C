@@ -421,6 +421,18 @@ class UserRole(Base):
     role: Mapped["Role"] = relationship("Role", back_populates="users")
 
 
+class TaskLock(Base):
+    __tablename__ = "task_locks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_name: Mapped[str] = mapped_column(String(128), unique=True, nullable=False, index=True)
+    locked_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+
+
 DEFAULT_PERMISSIONS: list[dict] = [
     {"code": "asset:view", "name": "查看资产", "module": "asset", "description": "查看资产列表和详情"},
     {"code": "asset:create", "name": "创建资产", "module": "asset", "description": "新增资产入库"},

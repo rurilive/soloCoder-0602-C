@@ -12,7 +12,7 @@ from app.models import (
     ApprovalChainCondition, ApprovalChainConditionRule,
     ApprovalProxy, ApprovalReminder, ApprovalNodeAction,
     ApprovalNodeActionType, ApprovalRecordType, TransferStatus,
-    OperationLog,
+    OperationLog, TaskLock,
     User, Role, UserRole,
     Notification, NotificationType,
 )
@@ -2779,7 +2779,69 @@ def get_operation_logs(
     return items, total
 
 
+def acquire_task_lock(db: Session, task_name: str, lock_ttl_seconds: int = 300, owner: str = "default") -> bool:
+    from sqlalchemy import text
+
+    now = datetime.now()
+    expires_at = now + timedelta(seconds=lock_ttl_seconds)
+
+    existing = db.query(TaskLock).filter(TaskLock.task_name == task_name).first()
+    if not existing:
+        try:
+            new_lock = TaskLock(task_name=task_name)
+            db.add(new_lock)
+            db.flush()
+        except Exception:
+            db.rollback()
+            existing = db.query(TaskLock).filter(TaskLock.task_name == task_name).first()
+            if not existing:
+                return False
+
+    result = db.execute(
+        text(
+            "UPDATE task_locks SET locked_by = :owner, locked_at = :now, expires_at = :expires "
+            "WHERE task_name = :task_name AND (locked_at IS NULL OR expires_at < :now)"
+        ),
+        {"owner": owner, "now": now, "expires": expires_at, "task_name": task_name},
+    )
+    db.flush()
+
+    return result.rowcount == 1
+
+
+def release_task_lock(db: Session, task_name: str) -> None:
+    from sqlalchemy import text
+
+    db.execute(
+        text(
+            "UPDATE task_locks SET locked_by = NULL, locked_at = NULL, expires_at = NULL "
+            "WHERE task_name = :task_name"
+        ),
+        {"task_name": task_name},
+    )
+    db.flush()
+
+
 def check_and_process_timeouts(db: Session) -> list[dict]:
+    import os
+
+    worker_id = os.getpid()
+    lock_name = "approval_timeout_check"
+    lock_ttl = 120
+
+    if not acquire_task_lock(db, lock_name, lock_ttl_seconds=lock_ttl, owner=f"worker-{worker_id}"):
+        logger.debug("[超时检查] 未获取到任务锁，跳过本次执行")
+        return []
+
+    try:
+        return _process_timeouts_internal(db)
+    finally:
+        release_task_lock(db, lock_name)
+
+
+def _process_timeouts_internal(db: Session) -> list[dict]:
+    from sqlalchemy import text
+
     now = datetime.now()
     timed_out_records = (
         db.query(ApprovalNodeRecord)
@@ -2822,6 +2884,26 @@ def check_and_process_timeouts(db: Session) -> list[dict]:
         pending_records = [r for r in records if r.status == ApprovalStatus.PENDING and r.transfer_status != TransferStatus.TRANSFERRED]
         if not pending_records:
             continue
+
+        lock_result = db.execute(
+            text(
+                "UPDATE approvals SET updated_at = :now "
+                "WHERE id = :approval_id AND status = :status AND current_level = :level"
+            ),
+            {
+                "now": now,
+                "approval_id": approval_id,
+                "status": ApprovalStatus.PENDING.value,
+                "level": level,
+            },
+        )
+        db.flush()
+
+        if lock_result.rowcount != 1:
+            logger.debug(f"[超时处理] 审批单#{approval_id}第{level}级已被其他实例处理，跳过")
+            continue
+
+        db.refresh(approval)
 
         for record in pending_records:
             record.status = ApprovalStatus.ESCALATED
