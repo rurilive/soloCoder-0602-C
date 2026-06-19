@@ -2785,24 +2785,15 @@ def acquire_task_lock(db: Session, task_name: str, lock_ttl_seconds: int = 300, 
     now = datetime.now()
     expires_at = now + timedelta(seconds=lock_ttl_seconds)
 
-    existing = db.query(TaskLock).filter(TaskLock.task_name == task_name).first()
-    if not existing:
-        try:
-            new_lock = TaskLock(task_name=task_name)
-            db.add(new_lock)
-            db.flush()
-        except Exception:
-            db.rollback()
-            existing = db.query(TaskLock).filter(TaskLock.task_name == task_name).first()
-            if not existing:
-                return False
-
     result = db.execute(
         text(
-            "UPDATE task_locks SET locked_by = :owner, locked_at = :now, expires_at = :expires "
-            "WHERE task_name = :task_name AND (locked_at IS NULL OR expires_at < :now)"
+            "INSERT INTO task_locks (task_name, locked_by, locked_at, expires_at, created_at, updated_at) "
+            "VALUES (:task_name, :owner, :now, :expires, :now, :now) "
+            "ON CONFLICT(task_name) DO UPDATE SET "
+            "  locked_by = :owner, locked_at = :now, expires_at = :expires, updated_at = :now "
+            "WHERE locked_at IS NULL OR expires_at < :now"
         ),
-        {"owner": owner, "now": now, "expires": expires_at, "task_name": task_name},
+        {"task_name": task_name, "owner": owner, "now": now, "expires": expires_at},
     )
     db.flush()
 
@@ -2841,7 +2832,9 @@ def check_and_process_timeouts(db: Session) -> list[dict]:
 
 def _process_timeouts_internal(db: Session) -> list[dict]:
     from sqlalchemy import text
+    import uuid
 
+    worker_id = f"timeout-{uuid.uuid4().hex[:8]}"
     now = datetime.now()
     timed_out_records = (
         db.query(ApprovalNodeRecord)
@@ -2887,10 +2880,12 @@ def _process_timeouts_internal(db: Session) -> list[dict]:
 
         lock_result = db.execute(
             text(
-                "UPDATE approvals SET updated_at = :now "
-                "WHERE id = :approval_id AND status = :status AND current_level = :level"
+                "UPDATE approvals SET processing_lock = :lock_id, updated_at = :now "
+                "WHERE id = :approval_id AND status = :status AND current_level = :level "
+                "AND processing_lock IS NULL"
             ),
             {
+                "lock_id": worker_id,
                 "now": now,
                 "approval_id": approval_id,
                 "status": ApprovalStatus.PENDING.value,
@@ -2900,128 +2895,137 @@ def _process_timeouts_internal(db: Session) -> list[dict]:
         db.flush()
 
         if lock_result.rowcount != 1:
-            logger.debug(f"[超时处理] 审批单#{approval_id}第{level}级已被其他实例处理，跳过")
+            logger.debug(f"[超时处理] 审批单#{approval_id}第{level}级已被其他实例锁定，跳过")
             continue
 
         db.refresh(approval)
 
-        for record in pending_records:
-            record.status = ApprovalStatus.ESCALATED
-            record.is_escalated = True
-            record.acted_at = now
-            record.opinion = "审批超时，自动升级"
+        try:
+            for record in pending_records:
+                record.status = ApprovalStatus.ESCALATED
+                record.is_escalated = True
+                record.acted_at = now
+                record.opinion = "审批超时，自动升级"
 
-        should_reject = False
-        reason_for_reject = ""
+            should_reject = False
+            reason_for_reject = ""
 
-        next_level = _get_next_record_level(db, approval.id, level)
+            next_level = _get_next_record_level(db, approval.id, level)
 
-        if next_level is not None:
-            next_records = (
-                db.query(ApprovalNodeRecord)
-                .filter(
-                    ApprovalNodeRecord.approval_id == approval.id,
-                    ApprovalNodeRecord.level == next_level,
+            if next_level is not None:
+                next_records = (
+                    db.query(ApprovalNodeRecord)
+                    .filter(
+                        ApprovalNodeRecord.approval_id == approval.id,
+                        ApprovalNodeRecord.level == next_level,
+                    )
+                    .all()
                 )
-                .all()
-            )
-            if next_records:
-                all_lower = True
-                for pending in pending_records:
-                    for next_r in next_records:
-                        if _role_is_truly_higher(pending.approver_role, next_r.approver_role):
-                            all_lower = False
+                if next_records:
+                    all_lower = True
+                    for pending in pending_records:
+                        for next_r in next_records:
+                            if _role_is_truly_higher(pending.approver_role, next_r.approver_role):
+                                all_lower = False
+                                break
+                        if not all_lower:
                             break
-                    if not all_lower:
-                        break
-                if all_lower:
-                    should_reject = True
-                    reason_for_reject = "下一级角色权限不高于当前级，避免升级死循环，自动驳回"
+                    if all_lower:
+                        should_reject = True
+                        reason_for_reject = "下一级角色权限不高于当前级，避免升级死循环，自动驳回"
 
-        if not should_reject and next_level is not None:
-            approval.current_level = next_level
-            _set_next_level_timeout(db, approval, "check_and_process_timeouts")
+            if not should_reject and next_level is not None:
+                approval.current_level = next_level
+                _set_next_level_timeout(db, approval, "check_and_process_timeouts")
 
-            mode_desc = {
-                ApprovalMode.SINGLE: "单人审批",
-                ApprovalMode.ALL_SIGN: "会签",
-                ApprovalMode.OR_SIGN: "或签",
-            }.get(node_mode, "审批")
+                mode_desc = {
+                    ApprovalMode.SINGLE: "单人审批",
+                    ApprovalMode.ALL_SIGN: "会签",
+                    ApprovalMode.OR_SIGN: "或签",
+                }.get(node_mode, "审批")
 
-            log = AssetLog(
-                asset_id=asset.id,
-                action="审批超时升级",
-                operator="系统",
-                operator_id=None,
-                detail=f"第{level}/{approval.total_levels}级{mode_desc}超时，自动升级到第{next_level}级（升级{len(pending_records)}人）",
-            )
-            db.add(log)
-
-            op_log = OperationLog(
-                module="approval",
-                action="timeout_escalate",
-                operator="系统",
-                detail=f"审批单#{approval.id}第{level}级{mode_desc}超时，升级到第{next_level}级（升级{len(pending_records)}人）",
-            )
-            db.add(op_log)
-
-            processed.append({
-                "approval_id": approval.id,
-                "level": level,
-                "action": "escalated",
-                "new_level": next_level,
-                "escalated_count": len(pending_records),
-            })
-        else:
-            if should_reject:
-                final_reason = reason_for_reject
-            else:
-                final_reason = "最高级审批超时，自动驳回"
-            approval.status = ApprovalStatus.REJECTED
-            approval.approver = "系统"
-            approval.approval_opinion = final_reason
-
-            asset.status = approval.previous_status
-
-            remaining_records = (
-                db.query(ApprovalNodeRecord)
-                .filter(
-                    ApprovalNodeRecord.approval_id == approval.id,
-                    ApprovalNodeRecord.level > level,
-                    ApprovalNodeRecord.status == ApprovalStatus.PENDING,
-                    ApprovalNodeRecord.transfer_status != TransferStatus.TRANSFERRED,
+                log = AssetLog(
+                    asset_id=asset.id,
+                    action="审批超时升级",
+                    operator="系统",
+                    operator_id=None,
+                    detail=f"第{level}/{approval.total_levels}级{mode_desc}超时，自动升级到第{next_level}级（升级{len(pending_records)}人）",
                 )
-                .all()
-            )
-            for r in remaining_records:
-                r.status = ApprovalStatus.REJECTED
+                db.add(log)
 
-            log_detail = (
-                f"（第{level}/{approval.total_levels}级）{final_reason}，资产状态恢复为{approval.previous_status.value}"
-            )
-            log = AssetLog(
-                asset_id=asset.id,
-                action="审批超时驳回",
-                operator="系统",
-                operator_id=None,
-                detail=log_detail,
-            )
-            db.add(log)
+                op_log = OperationLog(
+                    module="approval",
+                    action="timeout_escalate",
+                    operator="系统",
+                    detail=f"审批单#{approval.id}第{level}级{mode_desc}超时，升级到第{next_level}级（升级{len(pending_records)}人）",
+                )
+                db.add(op_log)
 
-            op_log = OperationLog(
-                module="approval",
-                action="timeout_reject",
-                operator="系统",
-                detail=f"审批单#{approval.id}{final_reason}",
-            )
-            db.add(op_log)
+                processed.append({
+                    "approval_id": approval.id,
+                    "level": level,
+                    "action": "escalated",
+                    "new_level": next_level,
+                    "escalated_count": len(pending_records),
+                })
+            else:
+                if should_reject:
+                    final_reason = reason_for_reject
+                else:
+                    final_reason = "最高级审批超时，自动驳回"
+                approval.status = ApprovalStatus.REJECTED
+                approval.approver = "系统"
+                approval.approval_opinion = final_reason
 
-            processed.append({
-                "approval_id": approval.id,
-                "level": level,
-                "action": "rejected",
-                "reason": final_reason,
-            })
+                asset.status = approval.previous_status
+
+                remaining_records = (
+                    db.query(ApprovalNodeRecord)
+                    .filter(
+                        ApprovalNodeRecord.approval_id == approval.id,
+                        ApprovalNodeRecord.level > level,
+                        ApprovalNodeRecord.status == ApprovalStatus.PENDING,
+                        ApprovalNodeRecord.transfer_status != TransferStatus.TRANSFERRED,
+                    )
+                    .all()
+                )
+                for r in remaining_records:
+                    r.status = ApprovalStatus.REJECTED
+
+                log_detail = (
+                    f"（第{level}/{approval.total_levels}级）{final_reason}，资产状态恢复为{approval.previous_status.value}"
+                )
+                log = AssetLog(
+                    asset_id=asset.id,
+                    action="审批超时驳回",
+                    operator="系统",
+                    operator_id=None,
+                    detail=log_detail,
+                )
+                db.add(log)
+
+                op_log = OperationLog(
+                    module="approval",
+                    action="timeout_reject",
+                    operator="系统",
+                    detail=f"审批单#{approval.id}{final_reason}",
+                )
+                db.add(op_log)
+
+                processed.append({
+                    "approval_id": approval.id,
+                    "level": level,
+                    "action": "rejected",
+                    "reason": final_reason,
+                })
+        finally:
+            db.execute(
+                text(
+                    "UPDATE approvals SET processing_lock = NULL WHERE id = :approval_id AND processing_lock = :lock_id"
+                ),
+                {"approval_id": approval_id, "lock_id": worker_id},
+            )
+            db.flush()
 
         processed_keys.add((approval_id, level))
 

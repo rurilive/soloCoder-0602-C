@@ -239,6 +239,7 @@ class Approval(Base):
     chain_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("approval_chains.id"), nullable=True)
     reminder_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     last_reminder_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    processing_lock: Mapped[str | None] = mapped_column(String(128), nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
 
