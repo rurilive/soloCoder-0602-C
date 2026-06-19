@@ -548,6 +548,7 @@ def test_concurrent_3thread_or_sign_approve():
         approval = crud.create_approval(db, asset.id, approval_data, applicant)
         approval_id = approval.id
         asset_id = asset.id
+        initial_level = approval.current_level
         print(f"  审批单#{approval.id}, status={approval.status.value}, level={approval.current_level}/{approval.total_levels}")
         records = crud.get_approval_node_records(db, approval.id)
         for r in records:
