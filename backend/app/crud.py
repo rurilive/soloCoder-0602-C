@@ -2836,6 +2836,7 @@ def _process_timeouts_internal(db: Session) -> list[dict]:
 
     worker_id = f"timeout-{uuid.uuid4().hex[:8]}"
     now = datetime.now()
+    stale_threshold = now - timedelta(minutes=10)
     timed_out_records = (
         db.query(ApprovalNodeRecord)
         .filter(
@@ -2882,7 +2883,7 @@ def _process_timeouts_internal(db: Session) -> list[dict]:
             text(
                 "UPDATE approvals SET processing_lock = :lock_id, updated_at = :now "
                 "WHERE id = :approval_id AND status = :status AND current_level = :level "
-                "AND processing_lock IS NULL"
+                "AND (processing_lock IS NULL OR updated_at < :stale_threshold)"
             ),
             {
                 "lock_id": worker_id,
@@ -2890,6 +2891,7 @@ def _process_timeouts_internal(db: Session) -> list[dict]:
                 "approval_id": approval_id,
                 "status": ApprovalStatus.PENDING.value,
                 "level": level,
+                "stale_threshold": stale_threshold,
             },
         )
         db.flush()
@@ -2900,6 +2902,8 @@ def _process_timeouts_internal(db: Session) -> list[dict]:
 
         db.refresh(approval)
 
+        savepoint = db.begin_nested()
+        result_entry = None
         try:
             for record in pending_records:
                 record.status = ApprovalStatus.ESCALATED
@@ -2961,13 +2965,13 @@ def _process_timeouts_internal(db: Session) -> list[dict]:
                 )
                 db.add(op_log)
 
-                processed.append({
+                result_entry = {
                     "approval_id": approval.id,
                     "level": level,
                     "action": "escalated",
                     "new_level": next_level,
                     "escalated_count": len(pending_records),
-                })
+                }
             else:
                 if should_reject:
                     final_reason = reason_for_reject
@@ -3012,13 +3016,13 @@ def _process_timeouts_internal(db: Session) -> list[dict]:
                 )
                 db.add(op_log)
 
-                processed.append({
+                result_entry = {
                     "approval_id": approval.id,
                     "level": level,
                     "action": "rejected",
                     "reason": final_reason,
-                })
-        finally:
+                }
+
             db.execute(
                 text(
                     "UPDATE approvals SET processing_lock = NULL WHERE id = :approval_id AND processing_lock = :lock_id"
@@ -3026,7 +3030,14 @@ def _process_timeouts_internal(db: Session) -> list[dict]:
                 {"approval_id": approval_id, "lock_id": worker_id},
             )
             db.flush()
+            savepoint.commit()
+        except Exception:
+            savepoint.rollback()
+            logger.exception(f"[超时处理] 审批单#{approval_id}第{level}级处理异常，保留processing_lock等待重试")
+            continue
 
+        if result_entry is not None:
+            processed.append(result_entry)
         processed_keys.add((approval_id, level))
 
     if processed:
