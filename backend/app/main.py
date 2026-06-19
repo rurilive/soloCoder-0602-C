@@ -390,6 +390,47 @@ def _migrate_add_signer_transfer_columns():
         db.close()
 
 
+def _migrate_processing_lock_columns():
+    db: Session = SessionLocal()
+    try:
+        from sqlalchemy import inspect, text
+        insp = inspect(engine)
+
+        if not insp.has_table("task_locks"):
+            db.execute(text(
+                "CREATE TABLE task_locks ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "task_name VARCHAR(128) UNIQUE NOT NULL, "
+                "locked_by VARCHAR(128), "
+                "locked_at DATETIME, "
+                "expires_at DATETIME, "
+                "created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+                "updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP"
+                ")"
+            ))
+            db.execute(text("CREATE INDEX IF NOT EXISTS ix_task_locks_task_name ON task_locks(task_name)"))
+            db.commit()
+            print("[数据迁移] 新建 task_locks 表")
+
+        approval_cols = {c["name"] for c in insp.get_columns("approvals")}
+        if "processing_lock" not in approval_cols:
+            db.execute(text("ALTER TABLE approvals ADD COLUMN processing_lock VARCHAR(128)"))
+            db.commit()
+            print("[数据迁移] approvals 新增 processing_lock 列")
+
+        approval_cols = {c["name"] for c in insp.get_columns("approvals")}
+        if "processing_locked_at" not in approval_cols:
+            db.execute(text("ALTER TABLE approvals ADD COLUMN processing_locked_at DATETIME"))
+            db.commit()
+            print("[数据迁移] approvals 新增 processing_locked_at 列")
+
+    except Exception as e:
+        db.rollback()
+        print(f"[数据迁移] processing_lock 并发锁迁移失败: {e}")
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
@@ -400,6 +441,7 @@ async def lifespan(app: FastAPI):
     _migrate_add_countersign_columns()
     _migrate_add_conditional_branch_columns()
     _migrate_add_signer_transfer_columns()
+    _migrate_processing_lock_columns()
     task = asyncio.create_task(_background_timeout_checker())
     yield
     task.cancel()
