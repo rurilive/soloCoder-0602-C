@@ -4,6 +4,7 @@ import base64
 import logging
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import text
 from fastapi import HTTPException
 from app.models import (
     Asset, AssetLog, AssetStatus, AssetCategory, ImportLog,
@@ -861,11 +862,15 @@ def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approv
             ApprovalNodeRecord.approval_id == approval_id,
             ApprovalNodeRecord.level == approval.current_level,
         )
+        .with_for_update()
         .all()
     )
 
     if not current_level_records:
         raise HTTPException(status_code=400, detail="当前审批节点不存在")
+
+    approval.updated_at = datetime.now()
+    db.flush()
 
     node_mode = _get_node_mode(db, current_level_records[0].chain_node_id)
 
@@ -938,6 +943,13 @@ def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approv
             detail=f"您没有权限审批此节点",
         )
 
+    db.refresh(pending_record)
+    if pending_record.status != ApprovalStatus.PENDING:
+        raise HTTPException(
+            status_code=409,
+            detail="并发冲突：该节点已被其他审批人处理，请刷新后重试",
+        )
+
     pending_record.status = ApprovalStatus.APPROVED
     pending_record.opinion = data.opinion
     pending_record.acted_at = now
@@ -956,9 +968,21 @@ def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approv
         )
         level_complete = all_approved
     elif node_mode == ApprovalMode.OR_SIGN:
+        db.flush()
+        for r in active_records:
+            if r is not pending_record:
+                db.refresh(r)
         any_approved = any(
             r.status == ApprovalStatus.APPROVED for r in active_records
         )
+        any_pending = any(
+            r.status == ApprovalStatus.PENDING for r in active_records
+        )
+        if any_approved and not any_pending:
+            raise HTTPException(
+                status_code=409,
+                detail="并发冲突：该或签节点已被其他审批人处理，请刷新后重试",
+            )
         if any_approved:
             for r in active_records:
                 if r.status == ApprovalStatus.PENDING:
@@ -1047,11 +1071,22 @@ def reject_approval(db: Session, approval_id: int, data: ApprovalAction, approve
             ApprovalNodeRecord.approval_id == approval_id,
             ApprovalNodeRecord.level == approval.current_level,
         )
+        .with_for_update()
         .all()
     )
 
     if not current_level_records:
         raise HTTPException(status_code=400, detail="当前审批节点不存在")
+
+    db.refresh(approval)
+    if approval.status != ApprovalStatus.PENDING:
+        raise HTTPException(
+            status_code=409,
+            detail="并发冲突：该审批单已被其他审批人处理，请刷新后重试",
+        )
+
+    approval.updated_at = datetime.now()
+    db.flush()
 
     node_mode = _get_node_mode(db, current_level_records[0].chain_node_id)
 
@@ -1116,12 +1151,22 @@ def reject_approval(db: Session, approval_id: int, data: ApprovalAction, approve
                 break
 
     if not pending_record:
-        raise HTTPException(status_code=400, detail="当前没有您需要审批的待处理节点，或节点已处理")
+        raise HTTPException(
+            status_code=409,
+            detail="并发冲突：该节点已被其他审批人处理，请刷新后重试",
+        )
 
     if approver and not is_direct_approver and not is_proxy_approver:
         raise HTTPException(
             status_code=403,
             detail=f"您没有权限审批此节点",
+        )
+
+    db.refresh(pending_record)
+    if pending_record.status != ApprovalStatus.PENDING:
+        raise HTTPException(
+            status_code=409,
+            detail="并发冲突：该节点已被其他审批人处理，请刷新后重试",
         )
 
     pending_record.status = ApprovalStatus.REJECTED
@@ -1132,7 +1177,10 @@ def reject_approval(db: Session, approval_id: int, data: ApprovalAction, approve
         pending_record.actual_approver = approver_name
         pending_record.proxy_source = proxy_principal_name
 
+    db.flush()
     for r in current_level_records:
+        if r is not pending_record:
+            db.refresh(r)
         if r.status == ApprovalStatus.PENDING:
             r.status = ApprovalStatus.REJECTED
             r.opinion = f"会签节点被驳回：{data.opinion or '无意见'}"
