@@ -4,7 +4,6 @@ import base64
 import logging
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import text
 from fastapi import HTTPException
 from app.models import (
     Asset, AssetLog, AssetStatus, AssetCategory, ImportLog,
@@ -843,9 +842,19 @@ def _check_proxy_conflict_for_countersign(
 
 
 def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approver: User | None = None) -> Approval:
-    approval = get_approval(db, approval_id)
+    approval = (
+        db.query(Approval)
+        .filter(Approval.id == approval_id)
+        .with_for_update()
+        .first()
+    )
+    if not approval:
+        raise HTTPException(status_code=404, detail="审批单不存在")
+
     if approval.status != ApprovalStatus.PENDING:
         raise HTTPException(status_code=400, detail="审批单已处理，不可重复操作")
+
+    db.refresh(approval)
 
     asset = get_asset(db, approval.asset_id)
     if asset.status != AssetStatus.PENDING_APPROVAL:
@@ -1052,9 +1061,19 @@ def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approv
 
 
 def reject_approval(db: Session, approval_id: int, data: ApprovalAction, approver: User | None = None) -> Approval:
-    approval = get_approval(db, approval_id)
+    approval = (
+        db.query(Approval)
+        .filter(Approval.id == approval_id)
+        .with_for_update()
+        .first()
+    )
+    if not approval:
+        raise HTTPException(status_code=404, detail="审批单不存在")
+
     if approval.status != ApprovalStatus.PENDING:
         raise HTTPException(status_code=400, detail="审批单已处理，不可重复操作")
+
+    db.refresh(approval)
 
     asset = get_asset(db, approval.asset_id)
     if asset.status != AssetStatus.PENDING_APPROVAL:
@@ -1077,13 +1096,6 @@ def reject_approval(db: Session, approval_id: int, data: ApprovalAction, approve
 
     if not current_level_records:
         raise HTTPException(status_code=400, detail="当前审批节点不存在")
-
-    db.refresh(approval)
-    if approval.status != ApprovalStatus.PENDING:
-        raise HTTPException(
-            status_code=409,
-            detail="并发冲突：该审批单已被其他审批人处理，请刷新后重试",
-        )
 
     approval.updated_at = datetime.now()
     db.flush()
