@@ -842,10 +842,6 @@ def _check_proxy_conflict_for_countersign(
 
 
 def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approver: User | None = None) -> Approval:
-    pre_approval = get_approval(db, approval_id)
-    if pre_approval.status != ApprovalStatus.PENDING:
-        raise HTTPException(status_code=400, detail="审批单已处理，不可重复操作")
-
     approval = (
         db.query(Approval)
         .filter(Approval.id == approval_id)
@@ -1067,10 +1063,6 @@ def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approv
 
 
 def reject_approval(db: Session, approval_id: int, data: ApprovalAction, approver: User | None = None) -> Approval:
-    pre_approval = get_approval(db, approval_id)
-    if pre_approval.status != ApprovalStatus.PENDING:
-        raise HTTPException(status_code=400, detail="审批单已处理，不可重复操作")
-
     approval = (
         db.query(Approval)
         .filter(Approval.id == approval_id)
