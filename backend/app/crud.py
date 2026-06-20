@@ -814,8 +814,10 @@ def _ensure_record_level_for_chain_node(
     db: Session, approval: Approval, target_chain_node_level: int
 ) -> int | None:
     """确保指定链节点级别存在对应的审批记录。
-    如果不存在，则在所有现有记录级别之后创建新的记录级别，
-    并生成该级别的所有审批人记录。
+    如果不存在，则按 chain_node_level 的逻辑顺序插入新级别，
+    重新编号所有 record_level 保证连续性，并生成该级别的所有审批人记录。
+
+    新记录的 timeout_at 根据链节点的 timeout_minutes 计算。
 
     Returns:
         新创建（或已存在）的记录级别，失败时返回None
@@ -835,14 +837,34 @@ def _ensure_record_level_for_chain_node(
     if not target_node.approvers:
         return None
 
-    all_existing_levels = sorted(set(
-        r[0] for r in db.query(ApprovalNodeRecord.level)
+    all_records = (
+        db.query(ApprovalNodeRecord)
         .filter(ApprovalNodeRecord.approval_id == approval.id)
-        .distinct()
         .all()
-    ))
+    )
 
-    new_record_level = (max(all_existing_levels) if all_existing_levels else 0) + 1
+    existing_chain_levels = sorted(set(r.chain_node_level for r in all_records))
+    new_chain_levels = sorted(existing_chain_levels + [target_chain_node_level])
+    new_level_map = {chain_lv: i + 1 for i, chain_lv in enumerate(new_chain_levels)}
+
+    old_current_chain_level = None
+    for r in all_records:
+        if r.level == approval.current_level:
+            old_current_chain_level = r.chain_node_level
+            break
+
+    for record in all_records:
+        new_lv = new_level_map[record.chain_node_level]
+        if new_lv != record.level:
+            record.level = new_lv
+
+    new_record_level = new_level_map[target_chain_node_level]
+
+    now = datetime.now()
+    if target_node.timeout_minutes is not None:
+        timeout_at = now + timedelta(minutes=target_node.timeout_minutes)
+    else:
+        timeout_at = None
 
     for approver in target_node.approvers:
         record = ApprovalNodeRecord(
@@ -854,11 +876,14 @@ def _ensure_record_level_for_chain_node(
             approver_role=approver.approver_role,
             approver_name=approver.approver_name,
             status=ApprovalStatus.PENDING,
-            timeout_at=None,
+            timeout_at=timeout_at,
         )
         db.add(record)
 
-    approval.total_levels = max(approval.total_levels, new_record_level)
+    if old_current_chain_level is not None:
+        approval.current_level = new_level_map[old_current_chain_level]
+
+    approval.total_levels = len(new_chain_levels)
 
     db.flush()
     return new_record_level
