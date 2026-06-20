@@ -778,60 +778,93 @@ def _get_node_escalation_config(db: Session, chain_node_id: int) -> tuple[Timeou
     return strategy, target
 
 
+def _get_chain_node_map(db: Session, chain_id: int) -> dict[int, ApprovalChainNode]:
+    nodes = db.query(ApprovalChainNode).filter(ApprovalChainNode.chain_id == chain_id).all()
+    return {node.level: node for node in nodes}
+
+
+def _chain_node_level_to_record_level(
+    db: Session, approval_id: int, chain_node_level: int
+) -> int | None:
+    record = (
+        db.query(ApprovalNodeRecord)
+        .filter(
+            ApprovalNodeRecord.approval_id == approval_id,
+            ApprovalNodeRecord.chain_node_level == chain_node_level,
+        )
+        .first()
+    )
+    return record.level if record else None
+
+
 def _detect_escalation_cycle(
     db: Session,
-    approval: Approval,
-    target_level: int,
-    current_level: int,
+    chain_id: int,
+    current_chain_level: int,
+    target_chain_level: int,
 ) -> bool:
-    all_levels = set(
-        r[0] for r in db.query(ApprovalNodeRecord.level)
-        .filter(ApprovalNodeRecord.approval_id == approval.id)
-        .distinct()
-        .all()
-    )
+    chain_nodes = _get_chain_node_map(db, chain_id)
+    if target_chain_level not in chain_nodes:
+        return False
+
     visited: set[int] = set()
-    visited.add(current_level)
-    level = target_level
-    max_iterations = len(all_levels) * 2 + 10
+    visited.add(current_chain_level)
+
+    current = target_chain_level
+    max_iterations = len(chain_nodes) * 2 + 10
     iterations = 0
-    while level is not None and level in all_levels and iterations < max_iterations:
+
+    while current is not None and current in chain_nodes and iterations < max_iterations:
         iterations += 1
-        if level in visited:
+        if current in visited:
             return True
-        visited.add(level)
-        next_level = _get_next_record_level(db, approval.id, level)
-        level = next_level
+        visited.add(current)
+
+        node = chain_nodes.get(current)
+        if not node:
+            break
+
+        strategy = node.escalation_strategy or TimeoutEscalationStrategy.ESCALATE_TO_LEVEL
+        if strategy == TimeoutEscalationStrategy.ESCALATE_TO_LEVEL and node.escalation_target_level is not None:
+            current = node.escalation_target_level
+        else:
+            break
+
     return False
 
 
 def _escalation_resolve_target_level(
     db: Session,
     approval: Approval,
-    current_level: int,
+    current_chain_node_level: int,
     strategy: TimeoutEscalationStrategy,
     configured_target: int | None,
 ) -> tuple[int | None, str]:
     if strategy == TimeoutEscalationStrategy.ESCALATE_TO_LEVEL:
         if configured_target is not None:
-            all_levels = set(
-                r[0] for r in db.query(ApprovalNodeRecord.level)
-                .filter(ApprovalNodeRecord.approval_id == approval.id)
-                .distinct()
-                .all()
-            )
-            if configured_target in all_levels:
-                if _detect_escalation_cycle(db, approval, configured_target, current_level):
-                    return None, f"升级到L{configured_target}会形成环路，自动驳回"
-                return configured_target, ""
-            return None, f"配置的升级目标级别L{configured_target}不存在，自动驳回"
-        return _get_next_record_level(db, approval.id, current_level), ""
+            if not approval.chain_id:
+                return None, "审批单无关联审批链，自动驳回"
+
+            chain_nodes = _get_chain_node_map(db, approval.chain_id)
+            if configured_target not in chain_nodes:
+                return None, f"配置的升级目标级别L{configured_target}不在审批链定义中，自动驳回"
+
+            if _detect_escalation_cycle(db, approval.chain_id, current_chain_node_level, configured_target):
+                return None, f"升级到L{configured_target}会形成环路，自动驳回"
+
+            record_level = _chain_node_level_to_record_level(db, approval.id, configured_target)
+            if record_level is None:
+                return None, f"升级目标级别L{configured_target}不在当前审批路径中，自动驳回"
+
+            return record_level, ""
+
+        return _get_next_record_level(db, approval.id, approval.current_level), ""
     if strategy == TimeoutEscalationStrategy.AUTO_REJECT:
         return None, "超时策略配置为自动驳回"
     if strategy == TimeoutEscalationStrategy.SKIP_NODE:
-        next_level = _get_next_record_level(db, approval.id, current_level)
+        next_level = _get_next_record_level(db, approval.id, approval.current_level)
         return next_level, ""
-    return _get_next_record_level(db, approval.id, current_level), ""
+    return _get_next_record_level(db, approval.id, approval.current_level), ""
 
 
 def _set_next_level_timeout(db: Session, approval: Approval, context: str = "unknown") -> None:
@@ -1604,7 +1637,7 @@ def _trigger_escalation_by_reminder(
                 record.opinion = f"催办{node_reminder_count}次未响应，自动升级"
 
     next_level, cycle_reason = _escalation_resolve_target_level(
-        db, approval, current_level, escalation_strategy, escalation_target
+        db, approval, pending_records[0].chain_node_level, escalation_strategy, escalation_target
     )
 
     if next_level is not None:
@@ -2920,7 +2953,7 @@ def check_and_process_timeouts(db: Session) -> list[dict]:
 
 
 def _process_timeouts_internal(db: Session) -> list[dict]:
-    from sqlalchemy import text
+    from sqlalchemy import text, or_
     import uuid
 
     worker_id = f"timeout-{uuid.uuid4().hex[:8]}"
@@ -2930,7 +2963,10 @@ def _process_timeouts_internal(db: Session) -> list[dict]:
         db.query(ApprovalNodeRecord)
         .filter(
             ApprovalNodeRecord.status == ApprovalStatus.PENDING,
-            ApprovalNodeRecord.transfer_status != TransferStatus.TRANSFERRED,
+            or_(
+                ApprovalNodeRecord.transfer_status.is_(None),
+                ApprovalNodeRecord.transfer_status != TransferStatus.TRANSFERRED,
+            ),
             ApprovalNodeRecord.timeout_at.isnot(None),
             ApprovalNodeRecord.timeout_at < now,
         )
@@ -2978,7 +3014,7 @@ def _process_timeouts_internal(db: Session) -> list[dict]:
                 "lock_id": worker_id,
                 "now": now,
                 "approval_id": approval_id,
-                "status": ApprovalStatus.PENDING.value,
+                "status": ApprovalStatus.PENDING.name,
                 "level": level,
                 "stale_threshold": stale_threshold,
             },
@@ -3033,7 +3069,7 @@ def _process_timeouts_internal(db: Session) -> list[dict]:
                     record.opinion = "审批超时，自动升级"
 
             next_level, cycle_reason = _escalation_resolve_target_level(
-                db, approval, level, escalation_strategy, escalation_target
+                db, approval, pending_records[0].chain_node_level, escalation_strategy, escalation_target
             )
 
             if next_level is not None:

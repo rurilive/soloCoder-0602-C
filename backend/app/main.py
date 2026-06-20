@@ -431,6 +431,35 @@ def _migrate_processing_lock_columns():
         db.close()
 
 
+def _migrate_escalation_strategy_columns():
+    db: Session = SessionLocal()
+    try:
+        from sqlalchemy import inspect, text
+        insp = inspect(engine)
+
+        chain_node_cols = {c["name"] for c in insp.get_columns("approval_chain_nodes")}
+        if "escalation_strategy" not in chain_node_cols:
+            db.execute(text(
+                "ALTER TABLE approval_chain_nodes ADD COLUMN escalation_strategy "
+                "VARCHAR(32) NOT NULL DEFAULT 'escalate_to_level'"
+            ))
+            db.commit()
+            print("[数据迁移] approval_chain_nodes 新增 escalation_strategy 列")
+
+        if "escalation_target_level" not in chain_node_cols:
+            db.execute(text(
+                "ALTER TABLE approval_chain_nodes ADD COLUMN escalation_target_level INTEGER"
+            ))
+            db.commit()
+            print("[数据迁移] approval_chain_nodes 新增 escalation_target_level 列")
+
+    except Exception as e:
+        db.rollback()
+        print(f"[数据迁移] 升级策略字段迁移失败: {e}")
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
@@ -442,6 +471,7 @@ async def lifespan(app: FastAPI):
     _migrate_add_conditional_branch_columns()
     _migrate_add_signer_transfer_columns()
     _migrate_processing_lock_columns()
+    _migrate_escalation_strategy_columns()
     task = asyncio.create_task(_background_timeout_checker())
     yield
     task.cancel()
