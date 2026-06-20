@@ -12,6 +12,7 @@ from app.models import (
     ApprovalChainCondition, ApprovalChainConditionRule,
     ApprovalProxy, ApprovalReminder, ApprovalNodeAction,
     ApprovalNodeActionType, ApprovalRecordType, TransferStatus,
+    TimeoutEscalationStrategy,
     OperationLog, TaskLock,
     User, Role, UserRole,
     Notification, NotificationType,
@@ -768,6 +769,71 @@ def _get_node_mode(db: Session, chain_node_id: int) -> ApprovalMode:
     return chain_node.mode
 
 
+def _get_node_escalation_config(db: Session, chain_node_id: int) -> tuple[TimeoutEscalationStrategy, int | None]:
+    chain_node = db.query(ApprovalChainNode).filter(ApprovalChainNode.id == chain_node_id).first()
+    if not chain_node:
+        return TimeoutEscalationStrategy.ESCALATE_TO_LEVEL, None
+    strategy = chain_node.escalation_strategy or TimeoutEscalationStrategy.ESCALATE_TO_LEVEL
+    target = chain_node.escalation_target_level
+    return strategy, target
+
+
+def _detect_escalation_cycle(
+    db: Session,
+    approval: Approval,
+    target_level: int,
+    current_level: int,
+) -> bool:
+    all_levels = set(
+        r[0] for r in db.query(ApprovalNodeRecord.level)
+        .filter(ApprovalNodeRecord.approval_id == approval.id)
+        .distinct()
+        .all()
+    )
+    visited: set[int] = set()
+    visited.add(current_level)
+    level = target_level
+    max_iterations = len(all_levels) * 2 + 10
+    iterations = 0
+    while level is not None and level in all_levels and iterations < max_iterations:
+        iterations += 1
+        if level in visited:
+            return True
+        visited.add(level)
+        next_level = _get_next_record_level(db, approval.id, level)
+        level = next_level
+    return False
+
+
+def _escalation_resolve_target_level(
+    db: Session,
+    approval: Approval,
+    current_level: int,
+    strategy: TimeoutEscalationStrategy,
+    configured_target: int | None,
+) -> tuple[int | None, str]:
+    if strategy == TimeoutEscalationStrategy.ESCALATE_TO_LEVEL:
+        if configured_target is not None:
+            all_levels = set(
+                r[0] for r in db.query(ApprovalNodeRecord.level)
+                .filter(ApprovalNodeRecord.approval_id == approval.id)
+                .distinct()
+                .all()
+            )
+            if configured_target in all_levels:
+                if _detect_escalation_cycle(db, approval, configured_target, current_level):
+                    return None, f"升级到L{configured_target}会形成环路，自动驳回"
+                return configured_target, ""
+            return None, f"配置的升级目标级别L{configured_target}不存在，自动驳回"
+        return _get_next_record_level(db, approval.id, current_level), ""
+    if strategy == TimeoutEscalationStrategy.AUTO_REJECT:
+        return None, "超时策略配置为自动驳回"
+    if strategy == TimeoutEscalationStrategy.SKIP_NODE:
+        next_level = _get_next_record_level(db, approval.id, current_level)
+        return next_level, ""
+    return _get_next_record_level(db, approval.id, current_level), ""
+
+
 def _set_next_level_timeout(db: Session, approval: Approval, context: str = "unknown") -> None:
     next_records = (
         db.query(ApprovalNodeRecord)
@@ -1496,71 +1562,88 @@ def _trigger_escalation_by_reminder(
         return
 
     current_level = pending_records[0].level
+    chain_node_id = pending_records[0].chain_node_id
+    node_mode = _get_node_mode(db, chain_node_id)
+    escalation_strategy, escalation_target = _get_node_escalation_config(db, chain_node_id)
 
-    for record in pending_records:
-        if record.status == ApprovalStatus.PENDING:
-            record.status = ApprovalStatus.ESCALATED
-            record.is_escalated = True
-            record.acted_at = now
-            record.opinion = f"催办{node_reminder_count}次未响应，自动升级"
-
-    should_reject = False
-    reason_for_reject = ""
-
-    next_level = _get_next_record_level(db, approval.id, current_level)
-
-    if next_level is not None:
-        next_records = (
+    if escalation_strategy == TimeoutEscalationStrategy.SKIP_NODE:
+        for record in pending_records:
+            if record.status == ApprovalStatus.PENDING:
+                record.status = ApprovalStatus.ESCALATED
+                record.is_escalated = True
+                record.acted_at = now
+                record.opinion = f"催办{node_reminder_count}次未响应，跳过当前节点"
+        all_level_records = (
             db.query(ApprovalNodeRecord)
             .filter(
                 ApprovalNodeRecord.approval_id == approval.id,
-                ApprovalNodeRecord.level == next_level,
+                ApprovalNodeRecord.level == current_level,
             )
             .all()
         )
-        if next_records:
-            all_lower = True
-            for pending in pending_records:
-                for next_r in next_records:
-                    if _role_is_truly_higher(pending.approver_role, next_r.approver_role):
-                        all_lower = False
-                        break
-                if not all_lower:
-                    break
-            if all_lower:
-                should_reject = True
-                reason_for_reject = "下一级角色权限不高于当前级，避免升级死循环，自动驳回"
+        for r in all_level_records:
+            if r.status == ApprovalStatus.PENDING and r.transfer_status != TransferStatus.TRANSFERRED:
+                if r not in pending_records:
+                    r.status = ApprovalStatus.ESCALATED
+                    r.is_escalated = True
+                    r.acted_at = now
+                    r.opinion = "会签节点跳过：其他审批人催办超时"
+    elif escalation_strategy == TimeoutEscalationStrategy.AUTO_REJECT:
+        for record in pending_records:
+            if record.status == ApprovalStatus.PENDING:
+                record.status = ApprovalStatus.REJECTED
+                record.is_escalated = True
+                record.acted_at = now
+                record.opinion = f"催办{node_reminder_count}次未响应，策略配置为自动驳回"
+    else:
+        for record in pending_records:
+            if record.status == ApprovalStatus.PENDING:
+                record.status = ApprovalStatus.ESCALATED
+                record.is_escalated = True
+                record.acted_at = now
+                record.opinion = f"催办{node_reminder_count}次未响应，自动升级"
 
-    if not should_reject and next_level is not None:
+    next_level, cycle_reason = _escalation_resolve_target_level(
+        db, approval, current_level, escalation_strategy, escalation_target
+    )
+
+    if next_level is not None:
         approval.current_level = next_level
         _set_next_level_timeout(db, approval, "remind_escalation")
 
-        node_mode = _get_node_mode(db, pending_records[0].chain_node_id)
         mode_desc = {
             ApprovalMode.SINGLE: "单人审批",
             ApprovalMode.ALL_SIGN: "会签",
             ApprovalMode.OR_SIGN: "或签",
         }.get(node_mode, "审批")
 
+        strategy_desc = {
+            TimeoutEscalationStrategy.ESCALATE_TO_LEVEL: "升级",
+            TimeoutEscalationStrategy.SKIP_NODE: "跳过",
+            TimeoutEscalationStrategy.AUTO_REJECT: "驳回",
+        }.get(escalation_strategy, "升级")
+
         log = AssetLog(
             asset_id=asset.id,
-            action="催办超时升级",
+            action="催办超时升级" if escalation_strategy != TimeoutEscalationStrategy.SKIP_NODE else "催办超时跳过",
             operator="系统",
             operator_id=None,
-            detail=f"第{current_level}/{approval.total_levels}级{mode_desc}催办{node_reminder_count}次未响应，自动升级到第{next_level}级（升级{len(pending_records)}人）",
+            detail=f"第{current_level}/{approval.total_levels}级{mode_desc}催办{node_reminder_count}次未响应，{strategy_desc}到第{next_level}级（{strategy_desc}{len(pending_records)}人）",
         )
         db.add(log)
 
         op_log = OperationLog(
             module="approval",
-            action="reminder_escalate",
+            action="reminder_escalate" if escalation_strategy != TimeoutEscalationStrategy.SKIP_NODE else "reminder_skip",
             operator="系统",
-            detail=f"审批单#{approval.id}第{current_level}级{mode_desc}催办{node_reminder_count}次未响应，升级到第{next_level}级（升级{len(pending_records)}人）",
+            detail=f"审批单#{approval.id}第{current_level}级{mode_desc}催办{node_reminder_count}次未响应，{strategy_desc}到第{next_level}级（{strategy_desc}{len(pending_records)}人）",
         )
         db.add(op_log)
     else:
-        if should_reject:
-            final_reason = reason_for_reject
+        if cycle_reason:
+            final_reason = cycle_reason
+        elif escalation_strategy == TimeoutEscalationStrategy.AUTO_REJECT:
+            final_reason = f"催办{node_reminder_count}次未响应，超时策略配置为自动驳回"
         else:
             final_reason = f"最高级审批催办{node_reminder_count}次未响应，自动驳回"
         approval.status = ApprovalStatus.REJECTED
@@ -2457,6 +2540,8 @@ def _build_temp_nodes_for_cycle_check(data_nodes: list) -> list:
             mode=node_data.mode,
             timeout_minutes=node_data.timeout_minutes,
             default_next_level=getattr(node_data, "default_next_level", None),
+            escalation_strategy=getattr(node_data, "escalation_strategy", TimeoutEscalationStrategy.ESCALATE_TO_LEVEL),
+            escalation_target_level=getattr(node_data, "escalation_target_level", None),
             conditions=temp_conditions,
         )
         temp_nodes.append(temp_node)
@@ -2495,6 +2580,8 @@ def create_approval_chain(db: Session, data: ApprovalChainCreate) -> ApprovalCha
             mode=node_data.mode,
             timeout_minutes=node_data.timeout_minutes,
             default_next_level=node_data.default_next_level,
+            escalation_strategy=node_data.escalation_strategy,
+            escalation_target_level=node_data.escalation_target_level,
         )
         db.add(node)
         db.flush()
@@ -2611,6 +2698,8 @@ def update_approval_chain(db: Session, chain_id: int, data: ApprovalChainUpdate)
                 mode=node_data.mode,
                 timeout_minutes=node_data.timeout_minutes,
                 default_next_level=node_data.default_next_level,
+                escalation_strategy=node_data.escalation_strategy,
+                escalation_target_level=node_data.escalation_target_level,
             )
             db.add(node)
             db.flush()
@@ -2905,40 +2994,49 @@ def _process_timeouts_internal(db: Session) -> list[dict]:
         savepoint = db.begin_nested()
         result_entry = None
         try:
-            for record in pending_records:
-                record.status = ApprovalStatus.ESCALATED
-                record.is_escalated = True
-                record.acted_at = now
-                record.opinion = "审批超时，自动升级"
+            escalation_strategy, escalation_target = _get_node_escalation_config(
+                db, pending_records[0].chain_node_id
+            )
 
-            should_reject = False
-            reason_for_reject = ""
-
-            next_level = _get_next_record_level(db, approval.id, level)
-
-            if next_level is not None:
-                next_records = (
+            if escalation_strategy == TimeoutEscalationStrategy.SKIP_NODE:
+                for record in pending_records:
+                    record.status = ApprovalStatus.ESCALATED
+                    record.is_escalated = True
+                    record.acted_at = now
+                    record.opinion = "审批超时，跳过当前节点"
+                all_level_records = (
                     db.query(ApprovalNodeRecord)
                     .filter(
                         ApprovalNodeRecord.approval_id == approval.id,
-                        ApprovalNodeRecord.level == next_level,
+                        ApprovalNodeRecord.level == level,
                     )
                     .all()
                 )
-                if next_records:
-                    all_lower = True
-                    for pending in pending_records:
-                        for next_r in next_records:
-                            if _role_is_truly_higher(pending.approver_role, next_r.approver_role):
-                                all_lower = False
-                                break
-                        if not all_lower:
-                            break
-                    if all_lower:
-                        should_reject = True
-                        reason_for_reject = "下一级角色权限不高于当前级，避免升级死循环，自动驳回"
+                for r in all_level_records:
+                    if r.status == ApprovalStatus.PENDING and r.transfer_status != TransferStatus.TRANSFERRED:
+                        if r not in pending_records:
+                            r.status = ApprovalStatus.ESCALATED
+                            r.is_escalated = True
+                            r.acted_at = now
+                            r.opinion = "会签节点跳过：其他审批人超时"
+            elif escalation_strategy == TimeoutEscalationStrategy.AUTO_REJECT:
+                for record in pending_records:
+                    record.status = ApprovalStatus.REJECTED
+                    record.is_escalated = True
+                    record.acted_at = now
+                    record.opinion = "审批超时，策略配置为自动驳回"
+            else:
+                for record in pending_records:
+                    record.status = ApprovalStatus.ESCALATED
+                    record.is_escalated = True
+                    record.acted_at = now
+                    record.opinion = "审批超时，自动升级"
 
-            if not should_reject and next_level is not None:
+            next_level, cycle_reason = _escalation_resolve_target_level(
+                db, approval, level, escalation_strategy, escalation_target
+            )
+
+            if next_level is not None:
                 approval.current_level = next_level
                 _set_next_level_timeout(db, approval, "check_and_process_timeouts")
 
@@ -2948,33 +3046,42 @@ def _process_timeouts_internal(db: Session) -> list[dict]:
                     ApprovalMode.OR_SIGN: "或签",
                 }.get(node_mode, "审批")
 
+                strategy_desc = {
+                    TimeoutEscalationStrategy.ESCALATE_TO_LEVEL: "升级",
+                    TimeoutEscalationStrategy.SKIP_NODE: "跳过",
+                    TimeoutEscalationStrategy.AUTO_REJECT: "驳回",
+                }.get(escalation_strategy, "升级")
+
                 log = AssetLog(
                     asset_id=asset.id,
-                    action="审批超时升级",
+                    action="审批超时升级" if escalation_strategy != TimeoutEscalationStrategy.SKIP_NODE else "审批超时跳过",
                     operator="系统",
                     operator_id=None,
-                    detail=f"第{level}/{approval.total_levels}级{mode_desc}超时，自动升级到第{next_level}级（升级{len(pending_records)}人）",
+                    detail=f"第{level}/{approval.total_levels}级{mode_desc}超时，{strategy_desc}到第{next_level}级（{strategy_desc}{len(pending_records)}人）",
                 )
                 db.add(log)
 
                 op_log = OperationLog(
                     module="approval",
-                    action="timeout_escalate",
+                    action="timeout_escalate" if escalation_strategy != TimeoutEscalationStrategy.SKIP_NODE else "timeout_skip",
                     operator="系统",
-                    detail=f"审批单#{approval.id}第{level}级{mode_desc}超时，升级到第{next_level}级（升级{len(pending_records)}人）",
+                    detail=f"审批单#{approval.id}第{level}级{mode_desc}超时，{strategy_desc}到第{next_level}级（{strategy_desc}{len(pending_records)}人）",
                 )
                 db.add(op_log)
 
                 result_entry = {
                     "approval_id": approval.id,
                     "level": level,
-                    "action": "escalated",
+                    "action": "escalated" if escalation_strategy == TimeoutEscalationStrategy.ESCALATE_TO_LEVEL else "skipped",
                     "new_level": next_level,
                     "escalated_count": len(pending_records),
+                    "strategy": escalation_strategy.value,
                 }
             else:
-                if should_reject:
-                    final_reason = reason_for_reject
+                if cycle_reason:
+                    final_reason = cycle_reason
+                elif escalation_strategy == TimeoutEscalationStrategy.AUTO_REJECT:
+                    final_reason = "超时策略配置为自动驳回"
                 else:
                     final_reason = "最高级审批超时，自动驳回"
                 approval.status = ApprovalStatus.REJECTED

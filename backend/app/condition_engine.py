@@ -8,6 +8,7 @@ from app.models import (
     ConditionField,
     ConditionLogic,
     AssetCategory,
+    TimeoutEscalationStrategy,
 )
 
 logger = logging.getLogger(__name__)
@@ -171,6 +172,12 @@ def detect_cycle(nodes: list[ApprovalChainNode]) -> list[int] | None:
                 targets.append(cond.target_level)
         if node.default_next_level is not None and node.default_next_level in all_levels:
             targets.append(node.default_next_level)
+        escalation_strategy = getattr(node, 'escalation_strategy', None)
+        escalation_target = getattr(node, 'escalation_target_level', None)
+        if (escalation_strategy == TimeoutEscalationStrategy.ESCALATE_TO_LEVEL
+                and escalation_target is not None
+                and escalation_target in all_levels):
+            targets.append(escalation_target)
         linear_next = level + 1
         if linear_next in all_levels:
             targets.append(linear_next)

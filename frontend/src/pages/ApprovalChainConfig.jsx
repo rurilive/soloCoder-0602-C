@@ -42,6 +42,12 @@ const LOGIC_MAP = {
   or: '任一满足 (OR)',
 }
 
+const ESCALATION_STRATEGY_MAP = {
+  escalate_to_level: '升级到指定级别',
+  auto_reject: '自动驳回',
+  skip_node: '跳过当前节点',
+}
+
 const CATEGORY_OPTIONS = [
   { value: 'computer', label: '电脑' },
   { value: 'monitor', label: '显示器' },
@@ -75,6 +81,8 @@ const makeEmptyNode = () => ({
   mode: 'single',
   timeout_minutes: '',
   default_next_level: '',
+  escalation_strategy: 'escalate_to_level',
+  escalation_target_level: '',
   approvers: [{ ...EMPTY_APPROVER }],
   conditions: [],
 })
@@ -153,6 +161,8 @@ export default function ApprovalChainConfig() {
             mode: n.mode || 'single',
             timeout_minutes: n.timeout_minutes != null ? String(n.timeout_minutes) : '',
             default_next_level: n.default_next_level != null ? String(n.default_next_level) : '',
+            escalation_strategy: n.escalation_strategy || 'escalate_to_level',
+            escalation_target_level: n.escalation_target_level != null ? String(n.escalation_target_level) : '',
             approvers:
               n.approvers && n.approvers.length > 0
                 ? n.approvers.map((a) => ({ approver_role: a.approver_role, approver_name: a.approver_name }))
@@ -414,10 +424,20 @@ export default function ApprovalChainConfig() {
         }
       }
 
+      let escalationTargetLevel = null
+      if (node.escalation_strategy === 'escalate_to_level' && node.escalation_target_level !== '' && node.escalation_target_level != null) {
+        const et = Number(node.escalation_target_level)
+        if (!isNaN(et) && et >= 1 && et <= totalNodes) {
+          escalationTargetLevel = et
+        }
+      }
+
       validNodes.push({
         mode: node.mode,
         timeout_minutes: node.timeout_minutes !== '' ? parseInt(node.timeout_minutes, 10) : null,
         default_next_level: defaultNextLevel,
+        escalation_strategy: node.escalation_strategy || 'escalate_to_level',
+        escalation_target_level: escalationTargetLevel,
         approvers: validApprovers,
         conditions: validConditions,
       })
@@ -715,6 +735,47 @@ function NodeEditor(props) {
             </button>
           </div>
         )}
+      </div>
+
+      <div style={{ padding: '8px 16px', background: 'var(--bg-secondary)', borderRadius: 6, marginTop: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-secondary)', minWidth: 80 }}>
+            超时升级策略
+          </span>
+          <div className="form-group" style={{ marginBottom: 0, minWidth: 160 }}>
+            <select
+              value={node.escalation_strategy || 'escalate_to_level'}
+              onChange={(e) => onNodeChange(nodeIdx, 'escalation_strategy', e.target.value)}
+            >
+              {Object.entries(ESCALATION_STRATEGY_MAP).map(([k, v]) => (
+                <option key={k} value={k}>{v}</option>
+              ))}
+            </select>
+          </div>
+          {node.escalation_strategy === 'escalate_to_level' && (
+            <div className="form-group" style={{ marginBottom: 0, minWidth: 140 }}>
+              <select
+                value={node.escalation_target_level || ''}
+                onChange={(e) => onNodeChange(nodeIdx, 'escalation_target_level', e.target.value)}
+              >
+                <option value="">下一级（默认）</option>
+                {Array.from({ length: totalNodes }, (_, i) => i + 1).map((lv) => (
+                  <option key={lv} value={String(lv)}>升级到 L{lv}</option>
+                ))}
+              </select>
+            </div>
+          )}
+          {node.escalation_strategy === 'skip_node' && (
+            <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+              跳过当前节点，流转至下一级
+            </span>
+          )}
+          {node.escalation_strategy === 'auto_reject' && (
+            <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+              超时后直接驳回审批
+            </span>
+          )}
+        </div>
       </div>
 
       {showConditions && (
@@ -1114,6 +1175,21 @@ function ChainCard({ chain, onEdit, onDelete, onReorder }) {
                       {node.default_next_level && (
                         <span className="status-badge" style={{ fontSize: 11, background: 'var(--bg-secondary)' }}>
                           默认→L{node.default_next_level}
+                        </span>
+                      )}
+                      {node.escalation_strategy && node.escalation_strategy !== 'escalate_to_level' && (
+                        <span className="status-badge" style={{ fontSize: 11, background: '#fef3c7', color: '#92400e' }}>
+                          超时: {ESCALATION_STRATEGY_MAP[node.escalation_strategy] || node.escalation_strategy}
+                        </span>
+                      )}
+                      {node.escalation_strategy === 'escalate_to_level' && node.escalation_target_level && (
+                        <span className="status-badge" style={{ fontSize: 11, background: '#dbeafe', color: '#1e40af' }}>
+                          超时→L{node.escalation_target_level}
+                        </span>
+                      )}
+                      {node.escalation_strategy === 'escalate_to_level' && !node.escalation_target_level && (
+                        <span className="status-badge" style={{ fontSize: 11, background: '#dbeafe', color: '#1e40af' }}>
+                          超时→下一级
                         </span>
                       )}
                       {hasConditions && (

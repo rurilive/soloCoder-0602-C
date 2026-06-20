@@ -56,6 +56,12 @@ class ApprovalMode(str, enum.Enum):
     OR_SIGN = "or_sign"
 
 
+class TimeoutEscalationStrategy(str, enum.Enum):
+    ESCALATE_TO_LEVEL = "escalate_to_level"
+    AUTO_REJECT = "auto_reject"
+    SKIP_NODE = "skip_node"
+
+
 class ApprovalNodeActionType(str, enum.Enum):
     ADD_SIGNER = "add_signer"
     TRANSFER = "transfer"
@@ -133,6 +139,12 @@ class ApprovalChainNode(Base):
     mode: Mapped[ApprovalMode] = mapped_column(Enum(ApprovalMode), default=ApprovalMode.SINGLE, nullable=False)
     timeout_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     default_next_level: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    escalation_strategy: Mapped[TimeoutEscalationStrategy] = mapped_column(
+        Enum(TimeoutEscalationStrategy),
+        default=TimeoutEscalationStrategy.ESCALATE_TO_LEVEL,
+        nullable=False,
+    )
+    escalation_target_level: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
 
     approvers: Mapped[list["ApprovalChainNodeApprover"]] = relationship(

@@ -4,6 +4,7 @@ from app.models import (
     AssetStatus, AssetCategory, ApprovalType, ApprovalStatus, NotificationType, ApprovalMode,
     ConditionOperator, ConditionField, ConditionLogic,
     ApprovalNodeActionType, ApprovalRecordType, TransferStatus,
+    TimeoutEscalationStrategy,
 )
 
 
@@ -326,6 +327,8 @@ class ChainNodeCreate(BaseModel):
     mode: ApprovalMode = ApprovalMode.SINGLE
     timeout_minutes: int | None = None
     default_next_level: int | None = Field(None, ge=1)
+    escalation_strategy: TimeoutEscalationStrategy = TimeoutEscalationStrategy.ESCALATE_TO_LEVEL
+    escalation_target_level: int | None = Field(None, ge=1)
     approvers: list[ChainNodeApproverCreate]
     conditions: list[ConditionCreate] = []
 
@@ -334,6 +337,8 @@ class ChainNodeUpdate(BaseModel):
     mode: ApprovalMode | None = None
     timeout_minutes: int | None = None
     default_next_level: int | None = Field(None, ge=1)
+    escalation_strategy: TimeoutEscalationStrategy | None = None
+    escalation_target_level: int | None = Field(None, ge=1)
     approvers: list[ChainNodeApproverCreate] | None = None
     conditions: list[ConditionCreate] | None = None
 
@@ -345,6 +350,8 @@ class ChainNodeResponse(BaseModel):
     mode: ApprovalMode
     timeout_minutes: int | None = None
     default_next_level: int | None = None
+    escalation_strategy: TimeoutEscalationStrategy = TimeoutEscalationStrategy.ESCALATE_TO_LEVEL
+    escalation_target_level: int | None = None
     approvers: list[ChainNodeApproverResponse] = []
     conditions: list[ConditionResponse] = []
     created_at: datetime
