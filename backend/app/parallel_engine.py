@@ -278,6 +278,7 @@ def check_branch_all_rejected(
     active_records = [
         r for r in branch_records
         if not (r.transfer_status and r.transfer_status == TransferStatus.TRANSFERRED)
+        and r.status != ApprovalStatus.WITHDRAWN
     ]
     if not active_records:
         return False

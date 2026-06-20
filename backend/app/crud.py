@@ -1206,6 +1206,46 @@ def _finish_approval_as_rejected(
     return approval
 
 
+def _reject_parallel_and_cancel_other_branches(
+    db: Session,
+    approval: Approval,
+    asset: Asset,
+    approver_name: str,
+    approver_id: int | None,
+    opinion: str | None,
+    group_id: str,
+    reason_branch_id: str | None = None,
+) -> Approval:
+    """
+    并行组中某分支全部驳回时，驳回整单并取消组内其他分支所有待办。
+    :param group_id: 要处理的并行组ID
+    :param reason_branch_id: 触发驳回的分支ID（不修改这个分支的记录，只改其他分支）
+    """
+    from datetime import datetime as _dt
+
+    now = _dt.now()
+
+    other_branch_pending = (
+        db.query(ApprovalNodeRecord)
+        .filter(
+            ApprovalNodeRecord.approval_id == approval.id,
+            ApprovalNodeRecord.parallel_group_id == group_id,
+            ApprovalNodeRecord.status == ApprovalStatus.PENDING,
+        )
+        .all()
+    )
+    for r in other_branch_pending:
+        if reason_branch_id and r.branch_id == reason_branch_id:
+            continue
+        r.status = ApprovalStatus.WITHDRAWN
+        r.opinion = f"其他分支全部驳回，审批单被驳回，本分支节点已取消"
+        r.acted_at = now
+
+    return _finish_approval_as_rejected(
+        db, approval, asset, approver_name, approver_id, opinion
+    )
+
+
 def _check_proxy_conflict_for_countersign(
     db: Session,
     approver: User,
@@ -1432,6 +1472,18 @@ def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approv
         group_id = pending_record.parallel_group_id
         branch_id = pending_record.branch_id
 
+        all_records_for_check = (
+            db.query(ApprovalNodeRecord)
+            .filter(ApprovalNodeRecord.approval_id == approval_id)
+            .all()
+        )
+        if check_branch_all_rejected(all_records_for_check, branch_id):
+            return _reject_parallel_and_cancel_other_branches(
+                db, approval, asset, approver_name, approver_id,
+                data.opinion or "并行分支全部驳回",
+                group_id, branch_id,
+            )
+
         branch_all_records = [r for r in all_records if r.branch_id == branch_id]
         branch_chain_nodes = [n for n in all_chain_nodes if n.branch_id == branch_id]
 
@@ -1440,16 +1492,13 @@ def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approv
             for r in branch_all_records:
                 r.branch_complete = True
 
-            if check_branch_all_rejected(all_records, branch_id):
-                return _finish_approval_as_rejected(
-                    db, approval, asset, approver_name, approver_id, data.opinion or "并行分支全部驳回"
-                )
-
             group_ready = check_parallel_group_ready_to_merge(all_records, group_id, all_chain_nodes)
             if group_ready:
-                if check_any_branch_rejected(all_records, group_id):
-                    return _finish_approval_as_rejected(
-                        db, approval, asset, approver_name, approver_id, data.opinion or "并行存在驳回分支"
+                if check_any_branch_rejected(all_records, group_id, all_chain_nodes):
+                    return _reject_parallel_and_cancel_other_branches(
+                        db, approval, asset, approver_name, approver_id,
+                        data.opinion or "并行存在驳回分支",
+                        group_id, None,
                     )
 
                 end_node = next((n for n in all_chain_nodes if n.parallel_group_id == group_id and n.node_type == ChainNodeType.PARALLEL_END), None)
@@ -1688,10 +1737,30 @@ def reject_approval(db: Session, approval_id: int, data: ApprovalAction, approve
     )
 
     if is_parallel_branch:
+        group_id = pending_record.parallel_group_id
         branch_id = pending_record.branch_id
+        branch_future_pending = [
+            r for r in all_records
+            if r.branch_id == branch_id
+            and r.level > pending_record.level
+            and r.status == ApprovalStatus.PENDING
+        ]
+        for r in branch_future_pending:
+            r.status = ApprovalStatus.WITHDRAWN
+            r.opinion = f"本分支前面节点被驳回，后续节点取消"
+            r.acted_at = now
+        db.flush()
+
+        all_records = (
+            db.query(ApprovalNodeRecord)
+            .filter(ApprovalNodeRecord.approval_id == approval_id)
+            .all()
+        )
         if check_branch_all_rejected(all_records, branch_id):
-            return _finish_approval_as_rejected(
-                db, approval, asset, approver_name, approver_id, data.opinion or f"并行分支全部驳回"
+            return _reject_parallel_and_cancel_other_branches(
+                db, approval, asset, approver_name, approver_id,
+                data.opinion or f"并行分支全部驳回",
+                group_id, branch_id,
             )
 
         mode_desc = {
@@ -3513,12 +3582,33 @@ def _process_timeouts_internal(db: Session) -> list[dict]:
                         approval.approver = "系统"
                         approval.approval_opinion = "并行分支超时全部驳回"
                         asset.status = approval.previous_status
-                        remaining_pending = [
+
+                        group_id_for_timeout = None
+                        for gr in all_records:
+                            if gr.branch_id == branch_id and gr.parallel_group_id:
+                                group_id_for_timeout = gr.parallel_group_id
+                                break
+
+                        if group_id_for_timeout:
+                            other_pending = [
+                                r for r in all_records
+                                if r.status == ApprovalStatus.PENDING
+                                and r.parallel_group_id == group_id_for_timeout
+                                and r.branch_id != branch_id
+                            ]
+                            for r in other_pending:
+                                r.status = ApprovalStatus.WITHDRAWN
+                                r.opinion = "其他分支超时全部驳回，审批单被驳回，本分支节点已取消"
+                                r.acted_at = now
+
+                        remaining_lock_pending = [
                             r for r in all_records
                             if r.status == ApprovalStatus.PENDING and _is_active_record(r)
                         ]
-                        for r in remaining_pending:
+                        for r in remaining_lock_pending:
                             r.status = ApprovalStatus.REJECTED
+                            r.acted_at = now
+
                         log = AssetLog(
                             asset_id=asset.id,
                             action="审批超时驳回",
