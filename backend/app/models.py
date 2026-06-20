@@ -60,6 +60,7 @@ class ChainNodeType(str, enum.Enum):
     APPROVAL = "approval"
     PARALLEL_START = "parallel_start"
     PARALLEL_END = "parallel_end"
+    SUB_PROCESS = "sub_process"
 
 
 class TimeoutEscalationStrategy(str, enum.Enum):
@@ -155,6 +156,7 @@ class ApprovalChainNode(Base):
         nullable=False,
     )
     escalation_target_level: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sub_process_chain_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("approval_chains.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
 
     approvers: Mapped[list["ApprovalChainNodeApprover"]] = relationship(
@@ -242,9 +244,23 @@ class ApprovalNodeRecord(Base):
     transferred_to: Mapped[str | None] = mapped_column(String(128), nullable=True)
     transfer_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_record_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("approval_node_records.id"), nullable=True)
+    sub_process_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("approvals.id"), nullable=True)
+    sub_process_nesting_level: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    parent_record_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("approval_node_records.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
 
-    source_record: Mapped["ApprovalNodeRecord | None"] = relationship("ApprovalNodeRecord", remote_side=[id])
+    source_record: Mapped["ApprovalNodeRecord | None"] = relationship("ApprovalNodeRecord", remote_side=[id], foreign_keys=[source_record_id])
+    parent_record: Mapped["ApprovalNodeRecord | None"] = relationship("ApprovalNodeRecord", remote_side=[id], foreign_keys=[parent_record_id])
+    sub_process_records: Mapped[list["ApprovalNodeRecord"]] = relationship(
+        "ApprovalNodeRecord",
+        back_populates="parent_record",
+        foreign_keys="ApprovalNodeRecord.parent_record_id",
+    )
+    sub_process_approval: Mapped["Approval | None"] = relationship(
+        "Approval",
+        foreign_keys=[sub_process_id],
+        primaryjoin="ApprovalNodeRecord.sub_process_id == Approval.id",
+    )
 
 
 class Approval(Base):

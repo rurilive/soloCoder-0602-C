@@ -66,6 +66,7 @@ const NODE_TYPE_MAP = {
   approval: '审批节点',
   parallel_start: '并行开始（网关）',
   parallel_end: '并行结束（合并）',
+  sub_process: '子流程',
 }
 
 const BRANCH_COLORS = ['#60a5fa', '#34d399', '#fbbf24', '#f87171', '#a78bfa', '#f472b6']
@@ -103,6 +104,22 @@ const makeEmptyNode = (type = 'approval') => {
   if (type === 'parallel_end') {
     return {
       node_type: 'parallel_end',
+      parallel_group_id: null,
+      branch_id: null,
+      branch_index: null,
+    }
+  }
+  if (type === 'sub_process') {
+    return {
+      node_type: 'sub_process',
+      sub_process_chain_id: '',
+      mode: 'single',
+      timeout_minutes: '',
+      default_next_level: '',
+      escalation_strategy: 'escalate_to_level',
+      escalation_target_level: '',
+      approvers: [],
+      conditions: [],
       parallel_group_id: null,
       branch_id: null,
       branch_index: null,
@@ -166,6 +183,7 @@ function formatConditionSummary(cond, nodeIdx, totalNodes) {
 
 export default function ApprovalChainConfig() {
   const [chains, setChains] = useState([])
+  const [allChains, setAllChains] = useState([])
   const [loading, setLoading] = useState(true)
   const [showModal, setShowModal] = useState(false)
   const [editingId, setEditingId] = useState(null)
@@ -177,6 +195,7 @@ export default function ApprovalChainConfig() {
     try {
       const res = await getApprovalChains()
       setChains(res.data.items || [])
+      setAllChains(res.data.items || [])
     } catch {
       alert('获取审批链列表失败')
     } finally {
@@ -205,6 +224,8 @@ export default function ApprovalChainConfig() {
       is_default: chain.is_default,
       nodes: chain.nodes && chain.nodes.length > 0
         ? chain.nodes.map((n) => ({
+            node_type: n.node_type || 'approval',
+            sub_process_chain_id: n.sub_process_chain_id != null ? String(n.sub_process_chain_id) : '',
             mode: n.mode || 'single',
             timeout_minutes: n.timeout_minutes != null ? String(n.timeout_minutes) : '',
             default_next_level: n.default_next_level != null ? String(n.default_next_level) : '',
@@ -213,7 +234,7 @@ export default function ApprovalChainConfig() {
             approvers:
               n.approvers && n.approvers.length > 0
                 ? n.approvers.map((a) => ({ approver_role: a.approver_role, approver_name: a.approver_name }))
-                : [{ ...EMPTY_APPROVER }],
+                : n.node_type === 'sub_process' ? [] : [{ ...EMPTY_APPROVER }],
             conditions:
               n.conditions && n.conditions.length > 0
                 ? n.conditions.map((c) => ({
@@ -227,6 +248,9 @@ export default function ApprovalChainConfig() {
                     })),
                   }))
                 : [],
+            parallel_group_id: n.parallel_group_id || null,
+            branch_id: n.branch_id || null,
+            branch_index: n.branch_index ?? null,
           }))
         : [makeEmptyNode()],
     })
@@ -537,6 +561,35 @@ export default function ApprovalChainConfig() {
       const nodeType = node.node_type || 'approval'
       levelCounter += 1
 
+      if (nodeType === 'sub_process') {
+        const subProcessChainId = node.sub_process_chain_id
+        if (!subProcessChainId || subProcessChainId === '') {
+          alert(`第${levelCounter}级子流程节点必须选择引用的审批链`)
+          return
+        }
+        if (editingId && Number(subProcessChainId) === editingId) {
+          alert(`第${levelCounter}级子流程节点不能引用自身`)
+          return
+        }
+        flattenNodes.push({
+          _flatType: 'sub_process',
+          level: levelCounter,
+          node_type: 'sub_process',
+          sub_process_chain_id: Number(subProcessChainId),
+          parallel_group_id: node.parallel_group_id || null,
+          branch_id: node.branch_id || null,
+          branch_index: node.branch_index ?? null,
+          mode: 'single',
+          timeout_minutes: null,
+          default_next_level: node.default_next_level,
+          escalation_strategy: 'escalate_to_level',
+          escalation_target_level: null,
+          approvers: [],
+          conditions: node.conditions || [],
+        })
+        continue
+      }
+
       if (nodeType === 'parallel_start') {
         const groupId = node.parallel_group_id || genId()
         groupIdStack.push(groupId)
@@ -562,6 +615,35 @@ export default function ApprovalChainConfig() {
           for (let ni = 0; ni < branch.nodes.length; ni++) {
             const bn = branch.nodes[ni]
             levelCounter += 1
+            const bnType = bn.node_type || 'approval'
+            if (bnType === 'sub_process') {
+              const subChainId = bn.sub_process_chain_id
+              if (!subChainId || subChainId === '') {
+                alert(`并行分支${bi + 1}的第${ni + 1}个子流程节点必须选择引用的审批链`)
+                return
+              }
+              if (editingId && Number(subChainId) === editingId) {
+                alert(`并行分支${bi + 1}的第${ni + 1}个子流程节点不能引用自身`)
+                return
+              }
+              flattenNodes.push({
+                _flatType: 'branch_node',
+                level: levelCounter,
+                node_type: 'sub_process',
+                sub_process_chain_id: Number(subChainId),
+                parallel_group_id: groupId,
+                branch_id: branch.branch_id,
+                branch_index: bi,
+                mode: 'single',
+                timeout_minutes: null,
+                default_next_level: bn.default_next_level,
+                escalation_strategy: 'escalate_to_level',
+                escalation_target_level: null,
+                approvers: [],
+                conditions: bn.conditions || [],
+              })
+              continue
+            }
             const validApprovers = bn.approvers.filter(
               (a) => a.approver_role.trim() && a.approver_name.trim()
             )
@@ -634,6 +716,24 @@ export default function ApprovalChainConfig() {
     const validNodes = []
     for (let nodeIdx = 0; nodeIdx < flattenNodes.length; nodeIdx++) {
       const node = flattenNodes[nodeIdx]
+
+      if (node.node_type === 'sub_process') {
+        validNodes.push({
+          node_type: 'sub_process',
+          sub_process_chain_id: node.sub_process_chain_id,
+          parallel_group_id: node.parallel_group_id,
+          branch_id: node.branch_id,
+          branch_index: node.branch_index,
+          mode: 'single',
+          timeout_minutes: null,
+          default_next_level: node.default_next_level !== '' ? Number(node.default_next_level) : null,
+          escalation_strategy: 'escalate_to_level',
+          escalation_target_level: null,
+          approvers: [],
+          conditions: node.conditions || [],
+        })
+        continue
+      }
 
       if (node.node_type === 'parallel_start' || node.node_type === 'parallel_end') {
         validNodes.push({
@@ -876,6 +976,9 @@ export default function ApprovalChainConfig() {
                     <button type="button" className="btn btn-outline btn-sm" onClick={() => addNode('approval')}>
                       + 审批节点
                     </button>
+                    <button type="button" className="btn btn-outline btn-sm" onClick={() => addNode('sub_process')}>
+                      + 子流程
+                    </button>
                     <button type="button" className="btn btn-outline btn-sm" onClick={() => addNode('parallel_start')}>
                       + 并行开始
                     </button>
@@ -912,6 +1015,20 @@ export default function ApprovalChainConfig() {
                           key={nodeIdx}
                           nodeIdx={nodeIdx}
                           totalNodes={form.nodes.length}
+                          onRemoveNode={removeNode}
+                        />
+                      )
+                    }
+                    if (nodeType === 'sub_process') {
+                      return (
+                        <SubProcessEditor
+                          key={nodeIdx}
+                          node={node}
+                          nodeIdx={nodeIdx}
+                          totalNodes={form.nodes.length}
+                          allChains={allChains}
+                          editingChainId={editingId}
+                          onNodeChange={handleNodeChange}
                           onRemoveNode={removeNode}
                         />
                       )
@@ -1593,6 +1710,75 @@ function ParallelEndEditor({ nodeIdx, totalNodes, onRemoveNode }) {
       </div>
       <div style={{ padding: '12px 16px', fontSize: 13, color: '#047857' }}>
         此节点不需要配置审批人。所有并行分支完成后在此合并，再继续流转到后续节点。
+      </div>
+    </div>
+  )
+}
+
+function SubProcessEditor(props) {
+  const {
+    node, nodeIdx, totalNodes, allChains, editingChainId,
+    onNodeChange, onRemoveNode,
+  } = props
+  const levelNum = nodeIdx + 1
+
+  const availableChains = allChains.filter(
+    (c) => !editingChainId || c.id !== editingChainId
+  )
+
+  return (
+    <div className="chain-form-node-block" style={{ border: '2px dashed #f59e0b', background: '#fffbeb' }}>
+      <div className="chain-form-node-header" style={{ background: '#f59e0b', color: '#fff' }}>
+        <span style={{ fontWeight: 600 }}>
+          ⤵ 第 {levelNum} 级：子流程
+        </span>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button
+            type="button"
+            className="btn btn-danger btn-sm"
+            onClick={() => onRemoveNode(nodeIdx)}
+            disabled={totalNodes <= 1}
+          >
+            删除节点
+          </button>
+        </div>
+      </div>
+      <div style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+          <div className="form-group" style={{ marginBottom: 0, flex: 1, minWidth: 200 }}>
+            <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>
+              引用审批链
+            </label>
+            <select
+              value={node.sub_process_chain_id || ''}
+              onChange={(e) => onNodeChange(nodeIdx, 'sub_process_chain_id', e.target.value)}
+            >
+              <option value="">请选择要引用的审批链</option>
+              {availableChains.map((chain) => (
+                <option key={chain.id} value={chain.id}>
+                  {chain.name} ({chain.approval_type === 'allocate' ? '领用' : '报废'})
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="form-group" style={{ marginBottom: 0, minWidth: 140 }}>
+            <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>
+              默认下一级
+            </label>
+            <select
+              value={node.default_next_level || ''}
+              onChange={(e) => onNodeChange(nodeIdx, 'default_next_level', e.target.value)}
+            >
+              <option value="">默认下一级（线性）</option>
+              {Array.from({ length: totalNodes }, (_, i) => i + 1).map((lv) => (
+                <option key={lv} value={String(lv)}>跳转到 L{lv}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+        <div style={{ fontSize: 12, color: '#92400e', padding: '8px 12px', background: '#fef3c7', borderRadius: 6 }}>
+          <strong>说明：</strong>子流程节点会引用另一条审批链的完整流程。子流程审批通过后继续父流程；子流程驳回时父节点也会驳回。支持最多嵌套3层子流程。
+        </div>
       </div>
     </div>
   )

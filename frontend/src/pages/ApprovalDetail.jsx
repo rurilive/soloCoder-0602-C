@@ -368,6 +368,205 @@ function GatewayBlock({ label, variant, showConnector, subLabel }) {
   )
 }
 
+function SubProcessBlock({
+  level,
+  nodeRecord,
+  subRecords,
+  approval,
+  currentUser,
+  onAddSigner,
+  onTransfer,
+  showConnector,
+  nestingLevel,
+}) {
+  const [collapsed, setCollapsed] = useState(false)
+  const state = getLevelState([nodeRecord], approval)
+
+  const getSubProcessState = () => {
+    if (!subRecords || subRecords.length === 0) return 'pending'
+    const hasRejected = subRecords.some(r => r.status === 'rejected')
+    if (hasRejected) return 'rejected'
+    const allApproved = subRecords.every(r =>
+      r.status === 'approved' || r.status === 'rejected' || r.status === 'withdrawn'
+    )
+    if (allApproved) return 'approved'
+    return 'current'
+  }
+
+  const subState = getSubProcessState()
+  const subColor = subState === 'approved' ? 'var(--success)' :
+    subState === 'rejected' ? 'var(--danger)' :
+      subState === 'current' ? 'var(--primary)' : 'var(--border)'
+
+  const subBg = subState === 'approved' ? '#f0fdf4' :
+    subState === 'rejected' ? '#fef2f2' :
+      subState === 'current' ? '#eff6ff' : 'var(--bg-secondary)'
+
+  const indentWidth = nestingLevel > 0 ? nestingLevel * 24 : 0
+
+  return (
+    <div style={{ position: 'relative', marginLeft: indentWidth }}>
+      {showConnector && <div className="chain-connector" />}
+      <div
+        style={{
+          position: 'relative',
+          padding: '10px 14px',
+          margin: '4px 0',
+          border: `2px solid ${subColor}`,
+          borderRadius: 8,
+          background: subBg,
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <NodeIcon state={state} />
+          <span
+            style={{
+              width: 28,
+              height: 28,
+              borderRadius: '50%',
+              background: '#f59e0b',
+              color: '#fff',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              fontWeight: 700,
+              fontSize: 14,
+            }}
+          >
+            ⤵
+          </span>
+          <div style={{ flex: 1 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <span style={{ fontWeight: 600 }}>
+                第 {level} 级 - {nodeRecord.approver_name}
+              </span>
+              <span
+                className={`status-badge status-${nodeRecord.status}`}
+                style={{ fontSize: 11 }}
+              >
+                {STATUS_MAP[nodeRecord.status]}
+              </span>
+              {nestingLevel > 0 && (
+                <span
+                  className="status-badge"
+                  style={{
+                    fontSize: 11,
+                    background: 'rgba(245, 158, 11, 0.15)',
+                    color: '#92400e',
+                  }}
+                >
+                  嵌套 {nestingLevel} 层
+                </span>
+              )}
+            </div>
+            {nodeRecord.opinion && (
+              <div className="chain-node-opinion" style={{ marginTop: 4 }}>
+                意见: {nodeRecord.opinion}
+              </div>
+            )}
+            {nodeRecord.acted_at && (
+              <div className="chain-node-meta" style={{ fontSize: 12, marginTop: 2 }}>
+                处理时间: {formatTime(nodeRecord.acted_at)}
+              </div>
+            )}
+          </div>
+          <button
+            type="button"
+            className="btn btn-sm btn-outline"
+            onClick={() => setCollapsed(!collapsed)}
+            style={{ fontSize: 12 }}
+          >
+            {collapsed ? '展开 ▼' : '收起 ▲'}
+          </button>
+        </div>
+      </div>
+
+      {!collapsed && subRecords && subRecords.length > 0 && (
+        <div style={{ marginTop: 4 }}>
+          {(() => {
+            const subLevelGroups = {}
+            for (const rec of subRecords) {
+              if (!subLevelGroups[rec.level]) subLevelGroups[rec.level] = []
+              subLevelGroups[rec.level].push(rec)
+            }
+            const subLevels = Object.keys(subLevelGroups)
+              .map(Number)
+              .sort((a, b) => a - b)
+
+            return subLevels.map((subLv, subIdx) => (
+              <SubProcessLevelNode
+                key={subLv}
+                level={subLv}
+                records={subLevelGroups[subLv]}
+                approval={approval}
+                currentUser={currentUser}
+                onAddSigner={onAddSigner}
+                onTransfer={onTransfer}
+                levelIdx={subIdx}
+                totalLevels={subLevels.length}
+                showConnector={subIdx > 0}
+                nestingLevel={nestingLevel + 1}
+              />
+            ))
+          })()}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function SubProcessLevelNode({
+  level,
+  records,
+  approval,
+  currentUser,
+  onAddSigner,
+  onTransfer,
+  levelIdx,
+  totalLevels,
+  showConnector,
+  nestingLevel,
+}) {
+  const firstRec = records[0]
+  const hasSubProcess = firstRec.node_type === 'sub_process' &&
+    firstRec.sub_process_records &&
+    firstRec.sub_process_records.length > 0
+
+  if (hasSubProcess) {
+    return (
+      <SubProcessBlock
+        level={level}
+        nodeRecord={firstRec}
+        subRecords={firstRec.sub_process_records}
+        approval={approval}
+        currentUser={currentUser}
+        onAddSigner={onAddSigner}
+        onTransfer={onTransfer}
+        showConnector={showConnector}
+        nestingLevel={nestingLevel}
+      />
+    )
+  }
+
+  const indentWidth = nestingLevel > 0 ? nestingLevel * 24 : 0
+
+  return (
+    <div style={{ marginLeft: indentWidth }}>
+      <LevelNodeBlock
+        level={level}
+        records={records}
+        approval={approval}
+        currentUser={currentUser}
+        onAddSigner={onAddSigner}
+        onTransfer={onTransfer}
+        levelIdx={levelIdx}
+        totalLevels={totalLevels}
+        showConnector={showConnector}
+      />
+    </div>
+  )
+}
+
 function buildTimelineSequence(nodes) {
   const levelGroups = {}
   for (const n of nodes) {
@@ -386,6 +585,16 @@ function buildTimelineSequence(nodes) {
     const groupId = first.parallel_group_id
     const branchId = first.branch_id
     const nodeType = first.node_type || 'approval'
+
+    if (nodeType === 'sub_process' && first.sub_process_records && first.sub_process_records.length > 0) {
+      if (activeGroupId && branchId) {
+        if (!activeBranchesMap[branchId]) activeBranchesMap[branchId] = []
+        activeBranchesMap[branchId].push(...recs)
+        continue
+      }
+      sequence.push({ type: 'sub_process', level, records: recs })
+      continue
+    }
 
     if (nodeType === 'parallel_start') {
       sequence.push({ type: 'gateway', variant: 'start', label: '并行开始', subLabel: '多个分支同时开始审批' })
@@ -489,6 +698,23 @@ function ChainTimeline({ approval, onAddSigner, onTransfer, currentUser }) {
                 />
               )
             }
+            if (item.type === 'sub_process') {
+              const nodeRecord = item.records[0]
+              return (
+                <SubProcessBlock
+                  key={idx}
+                  level={item.level}
+                  nodeRecord={nodeRecord}
+                  subRecords={nodeRecord.sub_process_records || []}
+                  approval={approval}
+                  currentUser={currentUser}
+                  onAddSigner={onAddSigner}
+                  onTransfer={onTransfer}
+                  showConnector={idx > 0}
+                  nestingLevel={0}
+                />
+              )
+            }
             if (item.type === 'parallel_group') {
               return (
                 <div key={idx} style={{ position: 'relative', margin: '8px 0' }}>
@@ -551,6 +777,24 @@ function ChainTimeline({ approval, onAddSigner, onTransfer, currentUser }) {
                               }
                               const bs = Object.keys(grouped).map(Number).sort((a, b) => a - b)
                               return bs.map((lv, li) => {
+                                const recs = grouped[lv]
+                                const firstRec = recs[0]
+                                if (firstRec.node_type === 'sub_process' && firstRec.sub_process_records) {
+                                  return (
+                                    <SubProcessBlock
+                                      key={lv}
+                                      level={lv}
+                                      nodeRecord={firstRec}
+                                      subRecords={firstRec.sub_process_records}
+                                      approval={approval}
+                                      currentUser={currentUser}
+                                      onAddSigner={onAddSigner}
+                                      onTransfer={onTransfer}
+                                      showConnector={li > 0}
+                                      nestingLevel={1}
+                                    />
+                                  )
+                                }
                                 const sub = { ...approval }
                                 return (
                                   <LevelNodeBlock
@@ -594,20 +838,40 @@ function ChainTimeline({ approval, onAddSigner, onTransfer, currentUser }) {
         </div>
       ) : (
         <div className="approval-chain-timeline">
-          {levels.map((level, levelIdx) => (
-            <LevelNodeBlock
-              key={level}
-              level={level}
-              records={levelGroups[level]}
-              approval={approval}
-              currentUser={currentUser}
-              onAddSigner={onAddSigner}
-              onTransfer={onTransfer}
-              levelIdx={levelIdx}
-              totalLevels={levels.length}
-              showConnector={levelIdx > 0}
-            />
-          ))}
+          {levels.map((level, levelIdx) => {
+            const records = levelGroups[level]
+            const firstRec = records[0]
+            if (firstRec.node_type === 'sub_process' && firstRec.sub_process_records) {
+              return (
+                <SubProcessBlock
+                  key={level}
+                  level={level}
+                  nodeRecord={firstRec}
+                  subRecords={firstRec.sub_process_records}
+                  approval={approval}
+                  currentUser={currentUser}
+                  onAddSigner={onAddSigner}
+                  onTransfer={onTransfer}
+                  showConnector={levelIdx > 0}
+                  nestingLevel={0}
+                />
+              )
+            }
+            return (
+              <LevelNodeBlock
+                key={level}
+                level={level}
+                records={levelGroups[level]}
+                approval={approval}
+                currentUser={currentUser}
+                onAddSigner={onAddSigner}
+                onTransfer={onTransfer}
+                levelIdx={levelIdx}
+                totalLevels={levels.length}
+                showConnector={levelIdx > 0}
+              />
+            )
+          })}
         </div>
       )}
     </div>

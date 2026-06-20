@@ -213,6 +213,12 @@ class ApprovalNodeRecordResponse(BaseModel):
     transferred_to: str | None = None
     transfer_reason: str | None = None
     source_record_id: int | None = None
+    sub_process_id: int | None = None
+    sub_process_nesting_level: int = 0
+    parent_record_id: int | None = None
+    sub_process_records: list["ApprovalNodeRecordResponse"] = []
+    node_type: ChainNodeType | None = None
+    sub_process_chain_id: int | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -337,6 +343,7 @@ class ChainNodeCreate(BaseModel):
     default_next_level: int | None = Field(None, ge=1)
     escalation_strategy: TimeoutEscalationStrategy = TimeoutEscalationStrategy.ESCALATE_TO_LEVEL
     escalation_target_level: int | None = Field(None, ge=1)
+    sub_process_chain_id: int | None = Field(None, ge=1)
     approvers: list[ChainNodeApproverCreate]
     conditions: list[ConditionCreate] = []
 
@@ -351,6 +358,7 @@ class ChainNodeUpdate(BaseModel):
     default_next_level: int | None = Field(None, ge=1)
     escalation_strategy: TimeoutEscalationStrategy | None = None
     escalation_target_level: int | None = Field(None, ge=1)
+    sub_process_chain_id: int | None = Field(None, ge=1)
     approvers: list[ChainNodeApproverCreate] | None = None
     conditions: list[ConditionCreate] | None = None
 
@@ -368,6 +376,8 @@ class ChainNodeResponse(BaseModel):
     default_next_level: int | None = None
     escalation_strategy: TimeoutEscalationStrategy = TimeoutEscalationStrategy.ESCALATE_TO_LEVEL
     escalation_target_level: int | None = None
+    sub_process_chain_id: int | None = None
+    sub_process_chain_name: str | None = None
     approvers: list[ChainNodeApproverResponse] = []
     conditions: list[ConditionResponse] = []
     created_at: datetime
