@@ -269,33 +269,37 @@ def check_branch_all_rejected(
     records: list,
     branch_id: str,
 ) -> bool:
+    from app.models import TransferStatus
+
     branch_records = [r for r in records if r.branch_id == branch_id]
     if not branch_records:
         return False
 
-    approval_statuses = [r for r in branch_records if hasattr(r, 'status')]
-    if not approval_statuses:
+    active_records = [
+        r for r in branch_records
+        if not (r.transfer_status and r.transfer_status == TransferStatus.TRANSFERRED)
+    ]
+    if not active_records:
         return False
 
-    all_complete = all(
-        r.status in (ApprovalStatus.REJECTED, ApprovalStatus.APPROVED, ApprovalStatus.WITHDRAWN, ApprovalStatus.ESCALATED)
-        for r in approval_statuses
-    )
+    all_rejected = all(r.status == ApprovalStatus.REJECTED for r in active_records)
+    return all_rejected
 
-    if not all_complete:
-        return False
 
-    has_rejected = any(r.status == ApprovalStatus.REJECTED for r in approval_statuses)
-    return has_rejected
+def _nodes_to_dict(chain_nodes: list | dict) -> dict[int, ApprovalChainNode]:
+    if isinstance(chain_nodes, dict):
+        return chain_nodes
+    return {n.level: n for n in chain_nodes}
 
 
 def check_branch_complete(
     records: list,
     branch_id: str,
-    chain_nodes: dict[int, ApprovalChainNode],
+    chain_nodes: list[ApprovalChainNode] | dict[int, ApprovalChainNode],
 ) -> bool:
     from app.models import TransferStatus
 
+    node_map = _nodes_to_dict(chain_nodes)
     branch_records = [r for r in records if r.branch_id == branch_id]
     if not branch_records:
         return False
@@ -308,24 +312,10 @@ def check_branch_complete(
     if not active_records:
         return False
 
-    for record in active_records:
-        node = chain_nodes.get(record.chain_node_level)
-        if not node:
-            continue
-
-        if node.mode == ApprovalMode.SINGLE:
-            if record.status not in (ApprovalStatus.APPROVED, ApprovalStatus.REJECTED):
-                return False
-        elif node.mode == ApprovalMode.ALL_SIGN:
-            if record.status not in (ApprovalStatus.APPROVED, ApprovalStatus.REJECTED):
-                return False
-        elif node.mode == ApprovalMode.OR_SIGN:
-            pass
-
     level_set = sorted(set(r.level for r in active_records))
     for level in level_set:
         level_records = [r for r in active_records if r.level == level]
-        node = chain_nodes.get(level_records[0].chain_node_level) if level_records else None
+        node = node_map.get(level_records[0].chain_node_level) if level_records else None
         if not node:
             return False
 
@@ -353,30 +343,46 @@ def check_branch_complete(
 
 def check_parallel_group_ready_to_merge(
     records: list,
-    group: ParallelGroup,
-    chain_nodes: dict[int, ApprovalChainNode],
-) -> tuple[bool, list[str]]:
-    completed_branches: list[str] = []
+    group_id: str,
+    chain_nodes: list[ApprovalChainNode] | dict[int, ApprovalChainNode],
+) -> bool:
+    groups = parse_parallel_groups(
+        list(chain_nodes.values()) if isinstance(chain_nodes, dict) else chain_nodes
+    )
+    group = groups.get(group_id)
+    if not group:
+        return False
 
+    node_map = _nodes_to_dict(chain_nodes)
     for branch in group.branches:
-        if check_branch_complete(records, branch.branch_id, chain_nodes):
-            completed_branches.append(branch.branch_id)
-
-    all_done = len(completed_branches) == group.get_branch_count()
-    return all_done, completed_branches
+        if not check_branch_complete(records, branch.branch_id, node_map):
+            return False
+    return True
 
 
 def check_any_branch_rejected(
     records: list,
-    group: ParallelGroup,
-) -> tuple[bool, list[str]]:
-    rejected_branches: list[str] = []
-
-    for branch in group.branches:
-        if check_branch_all_rejected(records, branch.branch_id):
-            rejected_branches.append(branch.branch_id)
-
-    return len(rejected_branches) > 0, rejected_branches
+    group_id: str,
+    chain_nodes: list[ApprovalChainNode] | dict[int, ApprovalChainNode] | None = None,
+) -> bool:
+    if chain_nodes is not None:
+        groups = parse_parallel_groups(
+            list(chain_nodes.values()) if isinstance(chain_nodes, dict) else chain_nodes
+        )
+        group = groups.get(group_id)
+        if not group:
+            return False
+        for branch in group.branches:
+            if check_branch_all_rejected(records, branch.branch_id):
+                return True
+        return False
+    else:
+        branch_records = [r for r in records if r.parallel_group_id == group_id]
+        branch_ids = set(r.branch_id for r in branch_records if r.branch_id)
+        for bid in branch_ids:
+            if check_branch_all_rejected(records, bid):
+                return True
+        return False
 
 
 def generate_branch_id() -> str:

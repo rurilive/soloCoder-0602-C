@@ -460,6 +460,47 @@ def _migrate_escalation_strategy_columns():
         db.close()
 
 
+def _migrate_parallel_gateway_columns():
+    db: Session = SessionLocal()
+    try:
+        from sqlalchemy import inspect, text
+        insp = inspect(engine)
+
+        if insp.has_table("approval_chain_nodes"):
+            chain_node_cols = {c["name"] for c in insp.get_columns("approval_chain_nodes")}
+            new_chain_cols = {
+                "node_type": "VARCHAR(32) NOT NULL DEFAULT 'approval'",
+                "parallel_group_id": "VARCHAR(64)",
+                "branch_id": "VARCHAR(64)",
+                "branch_index": "INTEGER",
+            }
+            for col_name, col_type in new_chain_cols.items():
+                if col_name not in chain_node_cols:
+                    db.execute(text(f"ALTER TABLE approval_chain_nodes ADD COLUMN {col_name} {col_type}"))
+                    db.commit()
+                    print(f"[数据迁移] approval_chain_nodes 新增 {col_name} 列")
+
+        if insp.has_table("approval_node_records"):
+            node_record_cols = {c["name"] for c in insp.get_columns("approval_node_records")}
+            new_record_cols = {
+                "parallel_group_id": "VARCHAR(64)",
+                "branch_id": "VARCHAR(64)",
+                "branch_index": "INTEGER",
+                "branch_complete": "BOOLEAN NOT NULL DEFAULT 0",
+            }
+            for col_name, col_type in new_record_cols.items():
+                if col_name not in node_record_cols:
+                    db.execute(text(f"ALTER TABLE approval_node_records ADD COLUMN {col_name} {col_type}"))
+                    db.commit()
+                    print(f"[数据迁移] approval_node_records 新增 {col_name} 列")
+
+    except Exception as e:
+        db.rollback()
+        print(f"[数据迁移] 并行网关节点字段迁移失败: {e}")
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
@@ -472,6 +513,7 @@ async def lifespan(app: FastAPI):
     _migrate_add_signer_transfer_columns()
     _migrate_processing_lock_columns()
     _migrate_escalation_strategy_columns()
+    _migrate_parallel_gateway_columns()
     task = asyncio.create_task(_background_timeout_checker())
     yield
     task.cancel()

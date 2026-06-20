@@ -531,6 +531,7 @@ export default function ApprovalChainConfig() {
 
     const flattenNodes = []
     let levelCounter = 0
+    const groupIdStack = []
     for (let nodeIdx = 0; nodeIdx < form.nodes.length; nodeIdx++) {
       const node = form.nodes[nodeIdx]
       const nodeType = node.node_type || 'approval'
@@ -538,6 +539,7 @@ export default function ApprovalChainConfig() {
 
       if (nodeType === 'parallel_start') {
         const groupId = node.parallel_group_id || genId()
+        groupIdStack.push(groupId)
         flattenNodes.push({
           _flatType: 'gateway',
           level: levelCounter,
@@ -592,11 +594,12 @@ export default function ApprovalChainConfig() {
       }
 
       if (nodeType === 'parallel_end') {
+        const currentGroupId = groupIdStack.length > 0 ? groupIdStack.pop() : (node.parallel_group_id || genId())
         flattenNodes.push({
           _flatType: 'gateway',
           level: levelCounter,
           node_type: 'parallel_end',
-          parallel_group_id: null,
+          parallel_group_id: currentGroupId,
           branch_id: null,
           branch_index: null,
           mode: 'single',
