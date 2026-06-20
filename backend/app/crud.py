@@ -721,7 +721,7 @@ def get_approval(db: Session, approval_id: int, current_user: User | None = None
                 .filter(
                     ApprovalNodeRecord.approval_id == approval_id,
                     ApprovalNodeRecord.status == ApprovalStatus.PENDING,
-                    ApprovalNodeRecord.transfer_status != TransferStatus.TRANSFERRED,
+                    _not_transferred_sql(),
                 )
                 .all()
             )
@@ -762,6 +762,14 @@ def _filter_active_records(records: list[ApprovalNodeRecord]) -> list[ApprovalNo
     return [r for r in records if _is_active_record(r)]
 
 
+def _not_transferred_sql():
+    from sqlalchemy import or_
+    return or_(
+        ApprovalNodeRecord.transfer_status.is_(None),
+        ApprovalNodeRecord.transfer_status != TransferStatus.TRANSFERRED,
+    )
+
+
 def _get_node_mode(db: Session, chain_node_id: int) -> ApprovalMode:
     chain_node = db.query(ApprovalChainNode).filter(ApprovalChainNode.id == chain_node_id).first()
     if not chain_node:
@@ -779,7 +787,12 @@ def _get_node_escalation_config(db: Session, chain_node_id: int) -> tuple[Timeou
 
 
 def _get_chain_node_map(db: Session, chain_id: int) -> dict[int, ApprovalChainNode]:
-    nodes = db.query(ApprovalChainNode).filter(ApprovalChainNode.chain_id == chain_id).all()
+    nodes = (
+        db.query(ApprovalChainNode)
+        .options(joinedload(ApprovalChainNode.approvers))
+        .filter(ApprovalChainNode.chain_id == chain_id)
+        .all()
+    )
     return {node.level: node for node in nodes}
 
 
@@ -795,6 +808,60 @@ def _chain_node_level_to_record_level(
         .first()
     )
     return record.level if record else None
+
+
+def _ensure_record_level_for_chain_node(
+    db: Session, approval: Approval, target_chain_node_level: int
+) -> int | None:
+    """确保指定链节点级别存在对应的审批记录。
+    如果不存在，则在所有现有记录级别之后创建新的记录级别，
+    并生成该级别的所有审批人记录。
+
+    Returns:
+        新创建（或已存在）的记录级别，失败时返回None
+    """
+    existing_record_level = _chain_node_level_to_record_level(db, approval.id, target_chain_node_level)
+    if existing_record_level is not None:
+        return existing_record_level
+
+    if not approval.chain_id:
+        return None
+
+    chain_nodes = _get_chain_node_map(db, approval.chain_id)
+    if target_chain_node_level not in chain_nodes:
+        return None
+
+    target_node = chain_nodes[target_chain_node_level]
+    if not target_node.approvers:
+        return None
+
+    all_existing_levels = sorted(set(
+        r[0] for r in db.query(ApprovalNodeRecord.level)
+        .filter(ApprovalNodeRecord.approval_id == approval.id)
+        .distinct()
+        .all()
+    ))
+
+    new_record_level = (max(all_existing_levels) if all_existing_levels else 0) + 1
+
+    for approver in target_node.approvers:
+        record = ApprovalNodeRecord(
+            approval_id=approval.id,
+            chain_node_id=target_node.id,
+            chain_node_approver_id=approver.id,
+            level=new_record_level,
+            chain_node_level=target_node.level,
+            approver_role=approver.approver_role,
+            approver_name=approver.approver_name,
+            status=ApprovalStatus.PENDING,
+            timeout_at=None,
+        )
+        db.add(record)
+
+    approval.total_levels = max(approval.total_levels, new_record_level)
+
+    db.flush()
+    return new_record_level
 
 
 def _detect_escalation_cycle(
@@ -852,7 +919,7 @@ def _escalation_resolve_target_level(
             if _detect_escalation_cycle(db, approval.chain_id, current_chain_node_level, configured_target):
                 return None, f"升级到L{configured_target}会形成环路，自动驳回"
 
-            record_level = _chain_node_level_to_record_level(db, approval.id, configured_target)
+            record_level = _ensure_record_level_for_chain_node(db, approval, configured_target)
             if record_level is None:
                 return None, f"升级目标级别L{configured_target}不在当前审批路径中，自动驳回"
 
@@ -874,7 +941,7 @@ def _set_next_level_timeout(db: Session, approval: Approval, context: str = "unk
             ApprovalNodeRecord.approval_id == approval.id,
             ApprovalNodeRecord.level == approval.current_level,
             ApprovalNodeRecord.status == ApprovalStatus.PENDING,
-            ApprovalNodeRecord.transfer_status != TransferStatus.TRANSFERRED,
+            _not_transferred_sql(),
         )
         .all()
     )
@@ -1480,7 +1547,7 @@ def remind_approval(db: Session, approval_id: int, message: str | None = None, a
     if not current_level_records:
         raise HTTPException(status_code=400, detail="当前审批节点不存在")
 
-    pending_records = [r for r in current_level_records if r.status == ApprovalStatus.PENDING and r.transfer_status != TransferStatus.TRANSFERRED]
+    pending_records = [r for r in current_level_records if r.status == ApprovalStatus.PENDING and _is_active_record(r)]
     if not pending_records:
         raise HTTPException(status_code=400, detail="当前节点已处理，不可催办")
 
@@ -1615,7 +1682,7 @@ def _trigger_escalation_by_reminder(
             .all()
         )
         for r in all_level_records:
-            if r.status == ApprovalStatus.PENDING and r.transfer_status != TransferStatus.TRANSFERRED:
+            if r.status == ApprovalStatus.PENDING and _is_active_record(r):
                 if r not in pending_records:
                     r.status = ApprovalStatus.ESCALATED
                     r.is_escalated = True
@@ -1691,7 +1758,7 @@ def _trigger_escalation_by_reminder(
                 ApprovalNodeRecord.approval_id == approval.id,
                 ApprovalNodeRecord.level > current_level,
                 ApprovalNodeRecord.status == ApprovalStatus.PENDING,
-                ApprovalNodeRecord.transfer_status != TransferStatus.TRANSFERRED,
+                _not_transferred_sql(),
             )
             .all()
         )
@@ -1742,7 +1809,7 @@ def get_my_pending_approvals(
             db.query(ApprovalNodeRecord.approval_id)
             .filter(
                 ApprovalNodeRecord.status == ApprovalStatus.PENDING,
-                ApprovalNodeRecord.transfer_status != TransferStatus.TRANSFERRED,
+                _not_transferred_sql(),
                 ApprovalNodeRecord.approver_role.in_(list(user_role_codes)) if user_role_codes else ApprovalNodeRecord.approver_role == "__none__",
             )
             .distinct()
@@ -1772,7 +1839,7 @@ def get_my_pending_approvals(
                         db.query(ApprovalNodeRecord.approval_id)
                         .filter(
                             ApprovalNodeRecord.status == ApprovalStatus.PENDING,
-                            ApprovalNodeRecord.transfer_status != TransferStatus.TRANSFERRED,
+                            _not_transferred_sql(),
                             ApprovalNodeRecord.approver_role.in_(list(principal_role_codes)),
                         )
                         .distinct()
@@ -3000,7 +3067,7 @@ def _process_timeouts_internal(db: Session) -> list[dict]:
 
         node_mode = _get_node_mode(db, records[0].chain_node_id)
 
-        pending_records = [r for r in records if r.status == ApprovalStatus.PENDING and r.transfer_status != TransferStatus.TRANSFERRED]
+        pending_records = [r for r in records if r.status == ApprovalStatus.PENDING and _is_active_record(r)]
         if not pending_records:
             continue
 
@@ -3049,7 +3116,7 @@ def _process_timeouts_internal(db: Session) -> list[dict]:
                     .all()
                 )
                 for r in all_level_records:
-                    if r.status == ApprovalStatus.PENDING and r.transfer_status != TransferStatus.TRANSFERRED:
+                    if r.status == ApprovalStatus.PENDING and _is_active_record(r):
                         if r not in pending_records:
                             r.status = ApprovalStatus.ESCALATED
                             r.is_escalated = True
@@ -3132,7 +3199,7 @@ def _process_timeouts_internal(db: Session) -> list[dict]:
                         ApprovalNodeRecord.approval_id == approval.id,
                         ApprovalNodeRecord.level > level,
                         ApprovalNodeRecord.status == ApprovalStatus.PENDING,
-                        ApprovalNodeRecord.transfer_status != TransferStatus.TRANSFERRED,
+                        _not_transferred_sql(),
                     )
                     .all()
                 )
