@@ -814,10 +814,14 @@ def _ensure_record_level_for_chain_node(
     db: Session, approval: Approval, target_chain_node_level: int
 ) -> int | None:
     """确保指定链节点级别存在对应的审批记录。
-    如果不存在，则按 chain_node_level 的逻辑顺序插入新级别，
-    重新编号所有 record_level 保证连续性，并生成该级别的所有审批人记录。
-
+    如果不存在，则按 chain_node_level 顺序插入新级别，
+    重新编号所有 record_level 使其与链节点逻辑顺序一致，
+    并生成该级别的所有审批人记录。
     新记录的 timeout_at 根据链节点的 timeout_minutes 计算。
+
+    _get_next_record_level 通过排序去重取下一个值，虽不要求
+    level连续，但要求level的排序顺序与链节点逻辑顺序一致，
+    否则升级后无法正确流转到下一级。
 
     Returns:
         新创建（或已存在）的记录级别，失败时返回None
