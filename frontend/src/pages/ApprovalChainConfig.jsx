@@ -62,6 +62,14 @@ const NEEDS_RANGE_OPERATORS = new Set(['between'])
 const NEEDS_NUMERIC_OPERATORS = new Set(['gt', 'gte', 'lt', 'lte', 'between'])
 const NEEDS_TEXT_OPERATORS = new Set(['contains'])
 
+const NODE_TYPE_MAP = {
+  approval: '审批节点',
+  parallel_start: '并行开始（网关）',
+  parallel_end: '并行结束（合并）',
+}
+
+const BRANCH_COLORS = ['#60a5fa', '#34d399', '#fbbf24', '#f87171', '#a78bfa', '#f472b6']
+
 const EMPTY_APPROVER = { approver_role: '', approver_name: '' }
 
 const makeEmptyRule = () => ({
@@ -77,7 +85,46 @@ const makeEmptyCondition = (targetLevel) => ({
   rules: [makeEmptyRule()],
 })
 
-const makeEmptyNode = () => ({
+const genId = () => Math.random().toString(36).slice(2, 10)
+
+const makeEmptyNode = (type = 'approval') => {
+  if (type === 'parallel_start') {
+    return {
+      node_type: 'parallel_start',
+      parallel_group_id: genId(),
+      branch_id: null,
+      branch_index: null,
+      branches: [
+        { branch_id: genId(), nodes: [makeEmptyBranchNode()] },
+        { branch_id: genId(), nodes: [makeEmptyBranchNode()] },
+      ],
+    }
+  }
+  if (type === 'parallel_end') {
+    return {
+      node_type: 'parallel_end',
+      parallel_group_id: null,
+      branch_id: null,
+      branch_index: null,
+    }
+  }
+  return {
+    node_type: 'approval',
+    mode: 'single',
+    timeout_minutes: '',
+    default_next_level: '',
+    escalation_strategy: 'escalate_to_level',
+    escalation_target_level: '',
+    approvers: [{ ...EMPTY_APPROVER }],
+    conditions: [],
+    parallel_group_id: null,
+    branch_id: null,
+    branch_index: null,
+  }
+}
+
+const makeEmptyBranchNode = () => ({
+  node_type: 'approval',
   mode: 'single',
   timeout_minutes: '',
   default_next_level: '',
@@ -216,10 +263,10 @@ export default function ApprovalChainConfig() {
     })
   }
 
-  const addNode = () => {
+  const addNode = (type = 'approval') => {
     setForm((prev) => ({
       ...prev,
-      nodes: [...prev.nodes, makeEmptyNode()],
+      nodes: [...prev.nodes, makeEmptyNode(type)],
     }))
   }
 
@@ -228,6 +275,124 @@ export default function ApprovalChainConfig() {
       ...prev,
       nodes: prev.nodes.filter((_, i) => i !== index),
     }))
+  }
+
+  const addBranch = (nodeIdx) => {
+    setForm((prev) => {
+      const nodes = [...prev.nodes]
+      const node = { ...nodes[nodeIdx] }
+      if (!node.branches) node.branches = []
+      node.branches = [...node.branches, { branch_id: genId(), nodes: [makeEmptyBranchNode()] }]
+      nodes[nodeIdx] = node
+      return { ...prev, nodes }
+    })
+  }
+
+  const removeBranch = (nodeIdx, branchIdx) => {
+    setForm((prev) => {
+      const nodes = [...prev.nodes]
+      const node = { ...nodes[nodeIdx] }
+      if (!node.branches || node.branches.length <= 2) return prev
+      node.branches = node.branches.filter((_, i) => i !== branchIdx)
+      nodes[nodeIdx] = node
+      return { ...prev, nodes }
+    })
+  }
+
+  const addBranchNode = (nodeIdx, branchIdx) => {
+    setForm((prev) => {
+      const nodes = [...prev.nodes]
+      const node = { ...nodes[nodeIdx] }
+      node.branches = [...(node.branches || [])]
+      const branch = { ...node.branches[branchIdx] }
+      branch.nodes = [...branch.nodes, makeEmptyBranchNode()]
+      node.branches[branchIdx] = branch
+      nodes[nodeIdx] = node
+      return { ...prev, nodes }
+    })
+  }
+
+  const removeBranchNode = (nodeIdx, branchIdx, nodeIdxInBranch) => {
+    setForm((prev) => {
+      const nodes = [...prev.nodes]
+      const node = { ...nodes[nodeIdx] }
+      node.branches = [...(node.branches || [])]
+      const branch = { ...node.branches[branchIdx] }
+      if (branch.nodes.length <= 1) return prev
+      branch.nodes = branch.nodes.filter((_, i) => i !== nodeIdxInBranch)
+      node.branches[branchIdx] = branch
+      nodes[nodeIdx] = node
+      return { ...prev, nodes }
+    })
+  }
+
+  const handleBranchNodeChange = (nodeIdx, branchIdx, nodeIdxInBranch, field, value) => {
+    setForm((prev) => {
+      const nodes = [...prev.nodes]
+      const node = { ...nodes[nodeIdx] }
+      node.branches = [...(node.branches || [])]
+      const branch = { ...node.branches[branchIdx] }
+      branch.nodes = [...branch.nodes]
+      branch.nodes[nodeIdxInBranch] = { ...branch.nodes[nodeIdxInBranch], [field]: value }
+      if (field === 'mode' && value === 'single' && branch.nodes[nodeIdxInBranch].approvers.length > 1) {
+        branch.nodes[nodeIdxInBranch].approvers = branch.nodes[nodeIdxInBranch].approvers.slice(0, 1)
+      }
+      node.branches[branchIdx] = branch
+      nodes[nodeIdx] = node
+      return { ...prev, nodes }
+    })
+  }
+
+  const handleBranchApproverChange = (nodeIdx, branchIdx, nodeIdxInBranch, approverIdx, field, value) => {
+    setForm((prev) => {
+      const nodes = [...prev.nodes]
+      const node = { ...nodes[nodeIdx] }
+      node.branches = [...(node.branches || [])]
+      const branch = { ...node.branches[branchIdx] }
+      branch.nodes = [...branch.nodes]
+      const branchNode = { ...branch.nodes[nodeIdxInBranch] }
+      const approvers = [...branchNode.approvers]
+      approvers[approverIdx] = { ...approvers[approverIdx], [field]: value }
+      branchNode.approvers = approvers
+      branch.nodes[nodeIdxInBranch] = branchNode
+      node.branches[branchIdx] = branch
+      nodes[nodeIdx] = node
+      return { ...prev, nodes }
+    })
+  }
+
+  const addBranchApprover = (nodeIdx, branchIdx, nodeIdxInBranch) => {
+    setForm((prev) => {
+      const nodes = [...prev.nodes]
+      const node = { ...nodes[nodeIdx] }
+      node.branches = [...(node.branches || [])]
+      const branch = { ...node.branches[branchIdx] }
+      branch.nodes = [...branch.nodes]
+      const branchNode = { ...branch.nodes[nodeIdxInBranch] }
+      if (branchNode.mode === 'single') return prev
+      branchNode.approvers = [...branchNode.approvers, { ...EMPTY_APPROVER }]
+      branch.nodes[nodeIdxInBranch] = branchNode
+      node.branches[branchIdx] = branch
+      nodes[nodeIdx] = node
+      return { ...prev, nodes }
+    })
+  }
+
+  const removeBranchApprover = (nodeIdx, branchIdx, nodeIdxInBranch, approverIdx) => {
+    setForm((prev) => {
+      const nodes = [...prev.nodes]
+      const node = { ...nodes[nodeIdx] }
+      node.branches = [...(node.branches || [])]
+      const branch = { ...node.branches[branchIdx] }
+      branch.nodes = [...branch.nodes]
+      const branchNode = { ...branch.nodes[nodeIdxInBranch] }
+      if (branchNode.approvers.length <= 1) return prev
+      branchNode.approvers = branchNode.approvers.filter((_, i) => i !== approverIdx)
+      branch.nodes[nodeIdxInBranch] = branchNode
+      node.branches[branchIdx] = branch
+      nodes[nodeIdx] = node
+      return { ...prev, nodes }
+    })
   }
 
   const addApprover = (nodeIdx) => {
@@ -363,10 +528,127 @@ export default function ApprovalChainConfig() {
       alert('请输入审批链名称')
       return
     }
-    const totalNodes = form.nodes.length
-    const validNodes = []
+
+    const flattenNodes = []
+    let levelCounter = 0
     for (let nodeIdx = 0; nodeIdx < form.nodes.length; nodeIdx++) {
       const node = form.nodes[nodeIdx]
+      const nodeType = node.node_type || 'approval'
+      levelCounter += 1
+
+      if (nodeType === 'parallel_start') {
+        const groupId = node.parallel_group_id || genId()
+        flattenNodes.push({
+          _flatType: 'gateway',
+          level: levelCounter,
+          node_type: 'parallel_start',
+          parallel_group_id: groupId,
+          branch_id: null,
+          branch_index: null,
+          mode: 'single',
+          timeout_minutes: null,
+          default_next_level: null,
+          escalation_strategy: 'escalate_to_level',
+          escalation_target_level: null,
+          approvers: [],
+          conditions: [],
+        })
+
+        const branches = node.branches || []
+        for (let bi = 0; bi < branches.length; bi++) {
+          const branch = branches[bi]
+          for (let ni = 0; ni < branch.nodes.length; ni++) {
+            const bn = branch.nodes[ni]
+            levelCounter += 1
+            const validApprovers = bn.approvers.filter(
+              (a) => a.approver_role.trim() && a.approver_name.trim()
+            )
+            if (validApprovers.length === 0) {
+              alert(`并行分支${bi + 1}的第${ni + 1}个节点至少配置一个审批人`)
+              return
+            }
+            if (bn.mode === 'single' && validApprovers.length > 1) {
+              alert(`并行分支${bi + 1}的第${ni + 1}个节点为单人通过模式，只能有一个审批人`)
+              return
+            }
+            flattenNodes.push({
+              _flatType: 'branch_node',
+              level: levelCounter,
+              node_type: 'approval',
+              parallel_group_id: groupId,
+              branch_id: branch.branch_id,
+              branch_index: bi,
+              mode: bn.mode,
+              timeout_minutes: bn.timeout_minutes,
+              default_next_level: bn.default_next_level,
+              escalation_strategy: bn.escalation_strategy,
+              escalation_target_level: bn.escalation_target_level,
+              approvers: validApprovers,
+              conditions: bn.conditions || [],
+            })
+          }
+        }
+        continue
+      }
+
+      if (nodeType === 'parallel_end') {
+        flattenNodes.push({
+          _flatType: 'gateway',
+          level: levelCounter,
+          node_type: 'parallel_end',
+          parallel_group_id: null,
+          branch_id: null,
+          branch_index: null,
+          mode: 'single',
+          timeout_minutes: null,
+          default_next_level: null,
+          escalation_strategy: 'escalate_to_level',
+          escalation_target_level: null,
+          approvers: [],
+          conditions: [],
+        })
+        continue
+      }
+
+      flattenNodes.push({
+        _flatType: 'approval',
+        level: levelCounter,
+        node_type: 'approval',
+        parallel_group_id: node.parallel_group_id || null,
+        branch_id: node.branch_id || null,
+        branch_index: node.branch_index ?? null,
+        mode: node.mode,
+        timeout_minutes: node.timeout_minutes,
+        default_next_level: node.default_next_level,
+        escalation_strategy: node.escalation_strategy,
+        escalation_target_level: node.escalation_target_level,
+        approvers: node.approvers,
+        conditions: node.conditions || [],
+      })
+    }
+
+    const totalNodes = flattenNodes.length
+    const validNodes = []
+    for (let nodeIdx = 0; nodeIdx < flattenNodes.length; nodeIdx++) {
+      const node = flattenNodes[nodeIdx]
+
+      if (node.node_type === 'parallel_start' || node.node_type === 'parallel_end') {
+        validNodes.push({
+          node_type: node.node_type,
+          parallel_group_id: node.parallel_group_id,
+          branch_id: node.branch_id,
+          branch_index: node.branch_index,
+          mode: 'single',
+          timeout_minutes: null,
+          default_next_level: null,
+          escalation_strategy: 'escalate_to_level',
+          escalation_target_level: null,
+          approvers: [],
+          conditions: [],
+        })
+        continue
+      }
+
       const validApprovers = node.approvers.filter(
         (a) => a.approver_role.trim() && a.approver_name.trim()
       )
@@ -433,6 +715,10 @@ export default function ApprovalChainConfig() {
       }
 
       validNodes.push({
+        node_type: node.node_type || 'approval',
+        parallel_group_id: node.parallel_group_id || null,
+        branch_id: node.branch_id || null,
+        branch_index: node.branch_index ?? null,
         mode: node.mode,
         timeout_minutes: node.timeout_minutes !== '' ? parseInt(node.timeout_minutes, 10) : null,
         default_next_level: defaultNextLevel,
@@ -581,33 +867,73 @@ export default function ApprovalChainConfig() {
               <div style={{ marginBottom: 16 }}>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
                   <label style={{ fontSize: 14, fontWeight: 500, color: 'var(--text-secondary)' }}>
-                    审批节点
+                    审批节点（支持并行网关）
                   </label>
-                  <button type="button" className="btn btn-outline btn-sm" onClick={addNode}>
-                    + 添加节点
-                  </button>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <button type="button" className="btn btn-outline btn-sm" onClick={() => addNode('approval')}>
+                      + 审批节点
+                    </button>
+                    <button type="button" className="btn btn-outline btn-sm" onClick={() => addNode('parallel_start')}>
+                      + 并行开始
+                    </button>
+                    <button type="button" className="btn btn-outline btn-sm" onClick={() => addNode('parallel_end')}>
+                      + 并行结束
+                    </button>
+                  </div>
                 </div>
                 <div className="chain-form-nodes">
-                  {form.nodes.map((node, nodeIdx) => (
-                    <NodeEditor
-                      key={nodeIdx}
-                      node={node}
-                      nodeIdx={nodeIdx}
-                      totalNodes={form.nodes.length}
-                      onNodeChange={handleNodeChange}
-                      onApproverChange={handleApproverChange}
-                      onAddApprover={addApprover}
-                      onRemoveApprover={removeApprover}
-                      onRemoveNode={removeNode}
-                      onAddCondition={addCondition}
-                      onRemoveCondition={removeCondition}
-                      onConditionChange={handleConditionChange}
-                      onAddRule={addRule}
-                      onRemoveRule={removeRule}
-                      onRuleChange={handleRuleChange}
-                      onRuleValueChange={handleRuleValueChange}
-                    />
-                  ))}
+                  {form.nodes.map((node, nodeIdx) => {
+                    const nodeType = node.node_type || 'approval'
+                    if (nodeType === 'parallel_start') {
+                      return (
+                        <ParallelStartEditor
+                          key={nodeIdx}
+                          node={node}
+                          nodeIdx={nodeIdx}
+                          totalNodes={form.nodes.length}
+                          onAddBranch={addBranch}
+                          onRemoveBranch={removeBranch}
+                          onAddBranchNode={addBranchNode}
+                          onRemoveBranchNode={removeBranchNode}
+                          onBranchNodeChange={handleBranchNodeChange}
+                          onBranchApproverChange={handleBranchApproverChange}
+                          onAddBranchApprover={addBranchApprover}
+                          onRemoveBranchApprover={removeBranchApprover}
+                          onRemoveNode={removeNode}
+                        />
+                      )
+                    }
+                    if (nodeType === 'parallel_end') {
+                      return (
+                        <ParallelEndEditor
+                          key={nodeIdx}
+                          nodeIdx={nodeIdx}
+                          totalNodes={form.nodes.length}
+                          onRemoveNode={removeNode}
+                        />
+                      )
+                    }
+                    return (
+                      <NodeEditor
+                        key={nodeIdx}
+                        node={node}
+                        nodeIdx={nodeIdx}
+                        totalNodes={form.nodes.length}
+                        onNodeChange={handleNodeChange}
+                        onApproverChange={handleApproverChange}
+                        onAddApprover={addApprover}
+                        onRemoveApprover={removeApprover}
+                        onRemoveNode={removeNode}
+                        onAddCondition={addCondition}
+                        onRemoveCondition={removeCondition}
+                        onConditionChange={handleConditionChange}
+                        onAddRule={addRule}
+                        onRemoveRule={removeRule}
+                        onRuleChange={handleRuleChange}
+                        onRuleValueChange={handleRuleValueChange}
+                      />
+                    )
+                  })}
                 </div>
               </div>
 
@@ -1038,6 +1364,237 @@ function RuleEditor(props) {
   )
 }
 
+function ParallelStartEditor(props) {
+  const {
+    node, nodeIdx, totalNodes,
+    onAddBranch, onRemoveBranch,
+    onAddBranchNode, onRemoveBranchNode,
+    onBranchNodeChange, onBranchApproverChange,
+    onAddBranchApprover, onRemoveBranchApprover,
+    onRemoveNode,
+  } = props
+
+  const branches = node.branches || []
+
+  return (
+    <div className="chain-form-node-block" style={{ border: '2px dashed #6366f1', background: '#eef2ff' }}>
+      <div className="chain-form-node-header" style={{ background: '#6366f1', color: '#fff' }}>
+        <span style={{ fontWeight: 600 }}>
+          ⇶ 第 {nodeIdx + 1} 级：并行开始（网关）
+        </span>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button
+            type="button"
+            className="btn btn-sm"
+            style={{ background: '#fff', color: '#6366f1' }}
+            onClick={() => onAddBranch(nodeIdx)}
+          >
+            + 添加分支
+          </button>
+          <button
+            type="button"
+            className="btn btn-danger btn-sm"
+            onClick={() => onRemoveNode(nodeIdx)}
+            disabled={totalNodes <= 1}
+          >
+            删除
+          </button>
+        </div>
+      </div>
+
+      <div style={{ padding: 12, display: 'flex', gap: 12, overflowX: 'auto' }}>
+        {branches.map((branch, branchIdx) => (
+          <div
+            key={branch.branch_id}
+            style={{
+              flex: '0 0 auto',
+              minWidth: 300,
+              border: `2px solid ${BRANCH_COLORS[branchIdx % BRANCH_COLORS.length]}`,
+              borderRadius: 8,
+              padding: 8,
+              background: '#fff',
+            }}
+          >
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              marginBottom: 8,
+              padding: '4px 8px',
+              borderRadius: 4,
+              background: BRANCH_COLORS[branchIdx % BRANCH_COLORS.length],
+              color: '#fff',
+            }}>
+              <span style={{ fontWeight: 600, fontSize: 13 }}>
+                分支 {branchIdx + 1}
+              </span>
+              <button
+                type="button"
+                className="btn btn-sm"
+                style={{ background: '#fff', color: '#dc2626', fontSize: 12 }}
+                onClick={() => onRemoveBranch(nodeIdx, branchIdx)}
+                disabled={branches.length <= 2}
+              >
+                移除分支
+              </button>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {branch.nodes.map((bn, bnIdx) => (
+                <div
+                  key={bnIdx}
+                  style={{
+                    border: `1px solid ${BRANCH_COLORS[branchIdx % BRANCH_COLORS.length]}`,
+                    borderRadius: 6,
+                    padding: 8,
+                    background: '#fafafa',
+                  }}
+                >
+                  <div style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    marginBottom: 6,
+                  }}>
+                    <span style={{
+                      fontSize: 12,
+                      fontWeight: 600,
+                      color: BRANCH_COLORS[branchIdx % BRANCH_COLORS.length],
+                    }}>
+                      节点 {bnIdx + 1}
+                    </span>
+                    <button
+                      type="button"
+                      className="btn btn-outline btn-sm"
+                      style={{ fontSize: 11 }}
+                      onClick={() => onRemoveBranchNode(nodeIdx, branchIdx, bnIdx)}
+                      disabled={branch.nodes.length <= 1}
+                    >
+                      删除节点
+                    </button>
+                  </div>
+                  <div style={{ display: 'flex', gap: 6, marginBottom: 6, flexWrap: 'wrap' }}>
+                    <div className="form-group" style={{ marginBottom: 0, minWidth: 130 }}>
+                      <select
+                        value={bn.mode}
+                        onChange={(e) => onBranchNodeChange(nodeIdx, branchIdx, bnIdx, 'mode', e.target.value)}
+                      >
+                        {Object.entries(MODE_MAP).map(([k, v]) => (
+                          <option key={k} value={k}>{v}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="form-group" style={{ marginBottom: 0, minWidth: 100 }}>
+                      <input
+                        type="number"
+                        min="1"
+                        placeholder="超时(min)"
+                        value={bn.timeout_minutes}
+                        onChange={(e) => onBranchNodeChange(nodeIdx, branchIdx, bnIdx, 'timeout_minutes', e.target.value)}
+                      />
+                    </div>
+                    <div className="form-group" style={{ marginBottom: 0, minWidth: 140 }}>
+                      <select
+                        value={bn.escalation_strategy || 'escalate_to_level'}
+                        onChange={(e) => onBranchNodeChange(nodeIdx, branchIdx, bnIdx, 'escalation_strategy', e.target.value)}
+                      >
+                        {Object.entries(ESCALATION_STRATEGY_MAP).map(([k, v]) => (
+                          <option key={k} value={k}>{v}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    {bn.approvers.map((a, ai) => (
+                      <div key={ai} style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                        <span style={{ fontSize: 11, color: '#666', minWidth: 24 }}>
+                          {bn.mode !== 'single' ? `#${ai + 1}` : ''}
+                        </span>
+                        <input
+                          type="text"
+                          placeholder="审批角色"
+                          value={a.approver_role}
+                          onChange={(e) => onBranchApproverChange(nodeIdx, branchIdx, bnIdx, ai, 'approver_role', e.target.value)}
+                          style={{ flex: 1, padding: '4px 8px', fontSize: 12 }}
+                        />
+                        <input
+                          type="text"
+                          placeholder="审批人"
+                          value={a.approver_name}
+                          onChange={(e) => onBranchApproverChange(nodeIdx, branchIdx, bnIdx, ai, 'approver_name', e.target.value)}
+                          style={{ flex: 1, padding: '4px 8px', fontSize: 12 }}
+                        />
+                        {bn.mode !== 'single' && (
+                          <button
+                            type="button"
+                            className="btn btn-outline btn-sm"
+                            style={{ fontSize: 11 }}
+                            onClick={() => onRemoveBranchApprover(nodeIdx, branchIdx, bnIdx, ai)}
+                            disabled={bn.approvers.length <= 1}
+                          >
+                            移除
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                  {bn.mode !== 'single' && (
+                    <div style={{ marginTop: 4 }}>
+                      <button
+                        type="button"
+                        className="btn btn-outline btn-sm"
+                        style={{ fontSize: 11 }}
+                        onClick={() => onAddBranchApprover(nodeIdx, branchIdx, bnIdx)}
+                      >
+                        + 审批人
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ))}
+              <button
+                type="button"
+                className="btn btn-outline btn-sm"
+                style={{ alignSelf: 'flex-start', fontSize: 12 }}
+                onClick={() => onAddBranchNode(nodeIdx, branchIdx)}
+              >
+                + 添加节点
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+      <div style={{ padding: '8px 16px', fontSize: 12, color: '#6366f1', fontWeight: 500 }}>
+        ⏚ 所有分支都审批通过后，才流转到后续节点（配合并行结束节点使用）
+      </div>
+    </div>
+  )
+}
+
+function ParallelEndEditor({ nodeIdx, totalNodes, onRemoveNode }) {
+  return (
+    <div className="chain-form-node-block" style={{ border: '2px dashed #10b981', background: '#ecfdf5' }}>
+      <div className="chain-form-node-header" style={{ background: '#10b981', color: '#fff' }}>
+        <span style={{ fontWeight: 600 }}>
+          ⏚ 第 {nodeIdx + 1} 级：并行结束（合并节点）
+        </span>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button
+            type="button"
+            className="btn btn-danger btn-sm"
+            onClick={() => onRemoveNode(nodeIdx)}
+            disabled={totalNodes <= 1}
+          >
+            删除
+          </button>
+        </div>
+      </div>
+      <div style={{ padding: '12px 16px', fontSize: 13, color: '#047857' }}>
+        此节点不需要配置审批人。所有并行分支完成后在此合并，再继续流转到后续节点。
+      </div>
+    </div>
+  )
+}
+
 function ChainCard({ chain, onEdit, onDelete, onReorder }) {
   const dragItem = useRef(null)
   const dragOverItem = useRef(null)
@@ -1136,12 +1693,67 @@ function ChainCard({ chain, onEdit, onDelete, onReorder }) {
         {localNodes && localNodes.length > 0 && (
           <div className="chain-nodes">
             {localNodes.map((node, i) => {
+              const nodeType = node.node_type || 'approval'
+              if (nodeType === 'parallel_start') {
+                return (
+                  <div
+                    key={node.id}
+                    className="chain-node-item"
+                    style={{
+                      border: '2px dashed #6366f1',
+                      background: '#eef2ff',
+                      borderLeft: '4px solid #6366f1',
+                    }}
+                  >
+                    <span className="chain-node-drag-handle">≡</span>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                        <span style={{ fontWeight: 600, minWidth: 28 }}>L{node.level}</span>
+                        <span className="status-badge" style={{ fontSize: 11, background: '#6366f1', color: '#fff' }}>
+                          ⇶ 并行开始
+                        </span>
+                        <span style={{ color: '#6366f1', fontSize: 12 }}>
+                          多分支并行审批网关
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                )
+              }
+              if (nodeType === 'parallel_end') {
+                return (
+                  <div
+                    key={node.id}
+                    className="chain-node-item"
+                    style={{
+                      border: '2px dashed #10b981',
+                      background: '#ecfdf5',
+                      borderLeft: '4px solid #10b981',
+                    }}
+                  >
+                    <span className="chain-node-drag-handle">≡</span>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                        <span style={{ fontWeight: 600, minWidth: 28 }}>L{node.level}</span>
+                        <span className="status-badge" style={{ fontSize: 11, background: '#10b981', color: '#fff' }}>
+                          ⏚ 并行结束
+                        </span>
+                        <span style={{ color: '#047857', fontSize: 12 }}>
+                          所有分支完成后合并
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                )
+              }
               const approvers = node.approvers && node.approvers.length > 0
                 ? node.approvers
                 : [{ approver_role: node.approver_role, approver_name: node.approver_name }]
               const modeLabel = MODE_MAP[node.mode] || '单人通过'
               const isSingle = !node.mode || node.mode === 'single'
               const hasConditions = node.conditions && node.conditions.length > 0
+              const isInBranch = !!node.branch_id
+              const branchColor = isInBranch ? BRANCH_COLORS[(node.branch_index || 0) % BRANCH_COLORS.length] : null
               return (
                 <div
                   key={node.id}
@@ -1150,6 +1762,7 @@ function ChainCard({ chain, onEdit, onDelete, onReorder }) {
                     draggingIdx === i ? 'chain-node-dragging' : '',
                     dropTargetIdx === i ? 'chain-node-drop-target' : '',
                   ].filter(Boolean).join(' ')}
+                  style={isInBranch && branchColor ? { borderLeft: `4px solid ${branchColor}` } : undefined}
                   draggable
                   onDragStart={(e) => handleDragStart(e, i)}
                   onDragEnter={(e) => handleDragEnter(e, i)}
@@ -1162,6 +1775,15 @@ function ChainCard({ chain, onEdit, onDelete, onReorder }) {
                   <div style={{ flex: 1 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: isSingle ? 4 : 6, flexWrap: 'wrap' }}>
                       <span style={{ fontWeight: 600, minWidth: 28 }}>L{node.level}</span>
+                      {isInBranch && (
+                        <span className="status-badge" style={{
+                          fontSize: 11,
+                          background: branchColor,
+                          color: '#fff',
+                        }}>
+                          分支{(node.branch_index ?? 0) + 1}
+                        </span>
+                      )}
                       {!isSingle && (
                         <span className="status-badge status-pending" style={{ fontSize: 11 }}>
                           {modeLabel}

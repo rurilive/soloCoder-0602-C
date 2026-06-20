@@ -56,6 +56,12 @@ class ApprovalMode(str, enum.Enum):
     OR_SIGN = "or_sign"
 
 
+class ChainNodeType(str, enum.Enum):
+    APPROVAL = "approval"
+    PARALLEL_START = "parallel_start"
+    PARALLEL_END = "parallel_end"
+
+
 class TimeoutEscalationStrategy(str, enum.Enum):
     ESCALATE_TO_LEVEL = "escalate_to_level"
     AUTO_REJECT = "auto_reject"
@@ -136,6 +142,10 @@ class ApprovalChainNode(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     chain_id: Mapped[int] = mapped_column(Integer, ForeignKey("approval_chains.id"), nullable=False, index=True)
     level: Mapped[int] = mapped_column(Integer, nullable=False)
+    node_type: Mapped[ChainNodeType] = mapped_column(Enum(ChainNodeType), default=ChainNodeType.APPROVAL, nullable=False)
+    parallel_group_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    branch_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    branch_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     mode: Mapped[ApprovalMode] = mapped_column(Enum(ApprovalMode), default=ApprovalMode.SINGLE, nullable=False)
     timeout_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     default_next_level: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -210,6 +220,10 @@ class ApprovalNodeRecord(Base):
     chain_node_approver_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("approval_chain_node_approvers.id"), nullable=True)
     level: Mapped[int] = mapped_column(Integer, nullable=False)
     chain_node_level: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    parallel_group_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    branch_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    branch_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    branch_complete: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     approver_role: Mapped[str] = mapped_column(String(64), nullable=False)
     approver_name: Mapped[str] = mapped_column(String(128), nullable=False)
     status: Mapped[ApprovalStatus] = mapped_column(Enum(ApprovalStatus), default=ApprovalStatus.PENDING, nullable=False)

@@ -4,7 +4,7 @@ from app.models import (
     AssetStatus, AssetCategory, ApprovalType, ApprovalStatus, NotificationType, ApprovalMode,
     ConditionOperator, ConditionField, ConditionLogic,
     ApprovalNodeActionType, ApprovalRecordType, TransferStatus,
-    TimeoutEscalationStrategy,
+    TimeoutEscalationStrategy, ChainNodeType,
 )
 
 
@@ -191,6 +191,10 @@ class ApprovalNodeRecordResponse(BaseModel):
     chain_node_approver_id: int | None = None
     level: int
     chain_node_level: int = 0
+    parallel_group_id: str | None = None
+    branch_id: str | None = None
+    branch_index: int | None = None
+    branch_complete: bool = False
     approver_role: str
     approver_name: str
     status: ApprovalStatus
@@ -324,6 +328,10 @@ class ConditionResponse(BaseModel):
 
 
 class ChainNodeCreate(BaseModel):
+    node_type: ChainNodeType = ChainNodeType.APPROVAL
+    parallel_group_id: str | None = None
+    branch_id: str | None = None
+    branch_index: int | None = None
     mode: ApprovalMode = ApprovalMode.SINGLE
     timeout_minutes: int | None = None
     default_next_level: int | None = Field(None, ge=1)
@@ -334,6 +342,10 @@ class ChainNodeCreate(BaseModel):
 
 
 class ChainNodeUpdate(BaseModel):
+    node_type: ChainNodeType | None = None
+    parallel_group_id: str | None = None
+    branch_id: str | None = None
+    branch_index: int | None = None
     mode: ApprovalMode | None = None
     timeout_minutes: int | None = None
     default_next_level: int | None = Field(None, ge=1)
@@ -347,6 +359,10 @@ class ChainNodeResponse(BaseModel):
     id: int
     chain_id: int
     level: int
+    node_type: ChainNodeType = ChainNodeType.APPROVAL
+    parallel_group_id: str | None = None
+    branch_id: str | None = None
+    branch_index: int | None = None
     mode: ApprovalMode
     timeout_minutes: int | None = None
     default_next_level: int | None = None

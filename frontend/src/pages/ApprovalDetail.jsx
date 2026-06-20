@@ -28,6 +28,8 @@ const EVENT_ICON_MAP = {
   escalate: '⬆️',
 }
 
+const BRANCH_COLORS = ['#60a5fa', '#34d399', '#fbbf24', '#f87171', '#a78bfa', '#f472b6']
+
 function formatTime(t) {
   if (!t) return '-'
   return new Date(t).toLocaleString('zh-CN')
@@ -99,6 +101,328 @@ function getApproverBadgeColor(state) {
   return 'var(--border)'
 }
 
+function ApproverRow({ rec, currentUser, onTransfer }) {
+  const approverState = getApproverState(rec)
+  const isCurrentUserApprover =
+    (rec.approver_name === currentUser?.real_name ||
+     rec.approver_name === currentUser?.username) &&
+    rec.status === 'pending' &&
+    rec.transfer_status !== 'transferred'
+  return (
+    <div
+      key={rec.id}
+      className={`chain-approver-row chain-approver-${approverState}`}
+      style={{
+        border: isCurrentUserApprover ? '1px solid var(--primary)' : 'none',
+        borderRadius: 6,
+        padding: isCurrentUserApprover ? 6 : 0,
+        background: isCurrentUserApprover ? 'rgba(13, 110, 253, 0.05)' : 'transparent',
+      }}
+    >
+      <span
+        className="chain-approver-icon"
+        style={{
+          width: 6,
+          height: 6,
+          borderRadius: '50%',
+          marginRight: 8,
+          background: getApproverBadgeColor(approverState),
+          display: 'inline-block',
+        }}
+      />
+      <div style={{ flex: 1 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+          <span style={{ fontWeight: 500 }}>{rec.approver_name}</span>
+          <span className={`status-badge status-${rec.transfer_status === 'transferred' ? 'transferred' : rec.status}`} style={{ fontSize: 11 }}>
+            {rec.transfer_status === 'transferred' ? '已转审' : STATUS_MAP[rec.status]}
+          </span>
+          {rec.is_added_signer && (
+            <span
+              className="status-badge"
+              style={{
+                fontSize: 11,
+                background: 'rgba(13, 110, 253, 0.12)',
+                color: 'var(--primary)',
+              }}
+            >
+              加签人
+            </span>
+          )}
+          {rec.proxy_source && (
+            <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+              ({rec.proxy_source} 代理)
+            </span>
+          )}
+          {rec.added_signer_by && (
+            <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+              (由 {rec.added_signer_by} 追加)
+            </span>
+          )}
+          {isCurrentUserApprover && (
+            <>
+              <span
+                className="status-badge"
+                style={{
+                  fontSize: 11,
+                  background: 'rgba(13, 110, 253, 0.15)',
+                  color: 'var(--primary)',
+                }}
+              >
+                您的待办
+              </span>
+              <button
+                className="btn btn-sm btn-outline"
+                style={{
+                  marginLeft: 4,
+                  fontSize: 12,
+                  padding: '2px 10px',
+                  borderColor: 'var(--warning)',
+                  color: 'var(--warning)',
+                }}
+                onClick={() => onTransfer && onTransfer(rec)}
+              >
+                🔄 转审
+              </button>
+            </>
+          )}
+        </div>
+        {(rec.opinion || rec.acted_at || rec.transferred_to || rec.added_signer_reason || rec.transfer_reason) && (
+          <div style={{ marginTop: 4 }}>
+            {rec.opinion && (
+              <div className="chain-node-opinion" style={{ marginTop: 0 }}>
+                意见: {rec.opinion}
+              </div>
+            )}
+            {rec.transferred_to && (
+              <div style={{ fontSize: 12, color: 'var(--warning)', marginTop: rec.opinion ? 2 : 0 }}>
+                转审给: {rec.transferred_to}
+                {rec.transfer_reason && ` (原因: ${rec.transfer_reason})`}
+              </div>
+            )}
+            {rec.transferred_from && rec.status === 'pending' && !rec.transfer_status && (
+              <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 2 }}>
+                转审来自: {rec.transferred_from}
+                {rec.transfer_reason && ` (原因: ${rec.transfer_reason})`}
+              </div>
+            )}
+            {rec.added_signer_reason && (
+              <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 2 }}>
+                加签原因: {rec.added_signer_reason}
+              </div>
+            )}
+            {rec.acted_at && (
+              <div className="chain-node-meta" style={{ fontSize: 12, marginTop: 2 }}>
+                处理时间: {formatTime(rec.acted_at)}
+              </div>
+            )}
+          </div>
+        )}
+        {approverState === 'current' && !rec.acted_at && (
+          <div className="chain-node-meta" style={{ color: 'var(--primary)', fontSize: 12, fontWeight: 500 }}>
+            等待审批中...
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function LevelNodeBlock({ level, records, approval, currentUser, onAddSigner, onTransfer, levelIdx, totalLevels, showConnector }) {
+  const state = getLevelState(records, approval)
+  const isMulti = records.length > 1
+  const role = records[0]?.approver_role
+  const partialApproved = approval.status === 'pending' && records.filter((r) => r.transfer_status !== 'transferred').some((r) => r.status === 'approved')
+    && records.filter((r) => r.transfer_status !== 'transferred').some((r) => r.status === 'pending')
+  const canAddSigner = partialApproved && (
+    approval.applicant === currentUser?.real_name ||
+    approval.applicant === currentUser?.username ||
+    currentUser?.roles?.includes('super_admin') ||
+    currentUser?.roles?.includes('asset_admin')
+  )
+  const inBranch = !!records[0]?.branch_id
+  const branchIdx = records[0]?.branch_index ?? 0
+  const branchColor = inBranch ? BRANCH_COLORS[branchIdx % BRANCH_COLORS.length] : null
+
+  return (
+    <div
+      className={`approval-chain-node chain-node-${state}`}
+      style={inBranch && branchColor ? {
+        borderLeft: `4px solid ${branchColor}`,
+        borderTopLeftRadius: 0,
+        borderBottomLeftRadius: 0,
+      } : undefined}
+    >
+      {showConnector && <div className="chain-connector" />}
+      <NodeIcon state={state} />
+      <div className="chain-node-content">
+        <div className="chain-node-title" style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
+          <span>第 {level} 级 - {role}</span>
+          {inBranch && (
+            <span
+              className="status-badge"
+              style={{
+                fontSize: 11,
+                background: branchColor,
+                color: '#fff',
+              }}
+            >
+              分支{branchIdx + 1}
+            </span>
+          )}
+          {isMulti && (
+            <span className="status-badge status-pending" style={{ fontSize: 11 }}>
+              {records.length} 人并行
+            </span>
+          )}
+          {partialApproved && (
+            <span
+              className="status-badge"
+              style={{
+                fontSize: 11,
+                background: 'rgba(255, 193, 7, 0.15)',
+                color: 'var(--warning)',
+              }}
+            >
+              部分通过
+            </span>
+          )}
+          {canAddSigner && (
+            <button
+              className="btn btn-sm btn-outline"
+              style={{
+                marginLeft: 8,
+                fontSize: 12,
+                padding: '2px 10px',
+                borderColor: 'var(--primary)',
+                color: 'var(--primary)',
+              }}
+              onClick={() => onAddSigner && onAddSigner(level, records)}
+            >
+              ➕ 加签
+            </button>
+          )}
+        </div>
+        <div className="chain-level-approvers">
+          {records.map((rec) => (
+            <ApproverRow
+              key={rec.id}
+              rec={rec}
+              currentUser={currentUser}
+              onTransfer={onTransfer}
+            />
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function GatewayBlock({ label, variant, showConnector, subLabel }) {
+  const color = variant === 'start' ? '#6366f1' : '#10b981'
+  const bg = variant === 'start' ? '#eef2ff' : '#ecfdf5'
+  return (
+    <div style={{
+      position: 'relative',
+      padding: '10px 14px',
+      margin: '4px 0',
+      border: `2px dashed ${color}`,
+      borderRadius: 8,
+      background: bg,
+    }}>
+      {showConnector && (
+        <div
+          style={{
+            position: 'absolute',
+            left: 19,
+            top: 0,
+            transform: 'translateY(-100%)',
+            width: 2,
+            height: 16,
+            background: 'var(--border)',
+          }}
+        />
+      )}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span
+          style={{
+            width: 28,
+            height: 28,
+            borderRadius: '50%',
+            background: color,
+            color: '#fff',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            fontWeight: 700,
+            fontSize: 14,
+          }}
+        >
+          {variant === 'start' ? '⇶' : '⏚'}
+        </span>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontWeight: 600, color }}>{label}</div>
+          {subLabel && <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{subLabel}</div>}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function buildTimelineSequence(nodes) {
+  const levelGroups = {}
+  for (const n of nodes) {
+    if (!levelGroups[n.level]) levelGroups[n.level] = []
+    levelGroups[n.level].push(n)
+  }
+  const levels = Object.keys(levelGroups).map(Number).sort((a, b) => a - b)
+
+  const sequence = []
+  let activeGroupId = null
+  let activeBranchesMap = null
+
+  for (const level of levels) {
+    const recs = levelGroups[level]
+    const first = recs[0]
+    const groupId = first.parallel_group_id
+    const branchId = first.branch_id
+    const nodeType = first.node_type || 'approval'
+
+    if (nodeType === 'parallel_start') {
+      sequence.push({ type: 'gateway', variant: 'start', label: '并行开始', subLabel: '多个分支同时开始审批' })
+      activeGroupId = groupId
+      activeBranchesMap = {}
+      continue
+    }
+
+    if (nodeType === 'parallel_end') {
+      if (activeBranchesMap) {
+        const branchSeq = Object.entries(activeBranchesMap)
+          .sort((a, b) => {
+            const ai = a[1][0]?.branch_index ?? 0
+            const bi = b[1][0]?.branch_index ?? 0
+            return ai - bi
+          })
+          .map(([bid, recs]) => ({ branch_id: bid, records: recs }))
+        sequence.push({ type: 'parallel_group', branches: branchSeq })
+      }
+      sequence.push({ type: 'gateway', variant: 'end', label: '并行结束', subLabel: '所有分支完成后合并继续' })
+      activeGroupId = null
+      activeBranchesMap = null
+      continue
+    }
+
+    if (activeGroupId && branchId) {
+      if (!activeBranchesMap[branchId]) activeBranchesMap[branchId] = []
+      activeBranchesMap[branchId].push(...recs)
+      continue
+    }
+
+    sequence.push({ type: 'level', level, records: recs })
+  }
+
+  return sequence
+}
+
 function ChainTimeline({ approval, onAddSigner, onTransfer, currentUser }) {
   const nodes = approval.node_records || []
   const hasChain = nodes.length > 0
@@ -129,6 +453,9 @@ function ChainTimeline({ approval, onAddSigner, onTransfer, currentUser }) {
     )
   }
 
+  const hasParallel = nodes.some((n) => n.parallel_group_id)
+  const sequence = hasParallel ? buildTimelineSequence(nodes) : null
+
   const levelGroups = {}
   for (const node of nodes) {
     if (!levelGroups[node.level]) levelGroups[node.level] = []
@@ -138,258 +465,151 @@ function ChainTimeline({ approval, onAddSigner, onTransfer, currentUser }) {
     .map(Number)
     .sort((a, b) => a - b)
 
-  const getChainNodeLevel = (level) => {
-    const recs = levelGroups[level]
-    if (!recs || recs.length === 0) return 0
-    return recs[0].chain_node_level || 0
-  }
-
-  const hasConditionalJump = (levelIdx) => {
-    if (levelIdx === 0) return false
-    const prevLevel = levels[levelIdx - 1]
-    const currLevel = levels[levelIdx]
-    const prevChainLevel = getChainNodeLevel(prevLevel)
-    const currChainLevel = getChainNodeLevel(currLevel)
-    if (prevChainLevel === 0 || currChainLevel === 0) return false
-    return currChainLevel !== prevChainLevel + 1
-  }
-
-  const isCountersignPartialApproved = (records, level) => {
-    if (approval.status !== 'pending' || level !== approval.current_level) return false
-    const activeRecords = records.filter((r) => r.transfer_status !== 'transferred')
-    const hasApproved = activeRecords.some((r) => r.status === 'approved')
-    const hasPending = activeRecords.some((r) => r.status === 'pending')
-    return hasApproved && hasPending
-  }
-
   return (
     <div className="card">
       <h3 style={{ marginBottom: 16 }}>
         审批流程
         <span style={{ fontSize: 13, fontWeight: 400, color: 'var(--text-secondary)', marginLeft: 8 }}>
           共 {approval.total_levels} 级审批
+          {hasParallel && <span style={{ marginLeft: 8 }}>（含并行分支）</span>}
         </span>
       </h3>
-      <div className="approval-chain-timeline">
-        {levels.map((level, levelIdx) => {
-          const records = levelGroups[level]
-          const state = getLevelState(records, approval)
-          const isMulti = records.length > 1
-          const role = records[0]?.approver_role
-          const chainNodeLevel = getChainNodeLevel(level)
-          const isJump = hasConditionalJump(levelIdx)
-          const prevChainLevel = levelIdx > 0 ? getChainNodeLevel(levels[levelIdx - 1]) : 0
-          const partialApproved = isCountersignPartialApproved(records, level)
-          const canAddSigner = partialApproved && (
-            approval.applicant === currentUser?.real_name ||
-            approval.applicant === currentUser?.username ||
-            currentUser?.roles?.includes('super_admin') ||
-            currentUser?.roles?.includes('asset_admin')
-          )
-          return (
-            <div key={level} className={`approval-chain-node chain-node-${state}`}>
-              {isJump && (
-                <div
-                  className="chain-jump-indicator"
-                  style={{
-                    position: 'absolute',
-                    left: 14,
-                    top: -2,
-                    transform: 'translateY(-100%)',
-                    fontSize: 11,
-                    color: 'var(--warning)',
-                    fontWeight: 500,
-                    background: 'rgba(255, 193, 7, 0.12)',
-                    padding: '3px 10px',
-                    borderRadius: 4,
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  ↷ 条件跳转：L{prevChainLevel} → L{chainNodeLevel}
-                </div>
-              )}
-              {levelIdx < levels.length - 1 && <div className="chain-connector" />}
-              <NodeIcon state={state} />
-              <div className="chain-node-content">
-                <div className="chain-node-title" style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
-                  <span>第 {level} 级 - {role}</span>
-                  {chainNodeLevel > 0 && chainNodeLevel !== level && (
-                    <span
-                      className="status-badge"
+
+      {sequence ? (
+        <div className="approval-chain-timeline">
+          {sequence.map((item, idx) => {
+            if (item.type === 'gateway') {
+              return (
+                <GatewayBlock
+                  key={idx}
+                  label={item.label}
+                  variant={item.variant}
+                  subLabel={item.subLabel}
+                  showConnector={idx > 0}
+                />
+              )
+            }
+            if (item.type === 'parallel_group') {
+              return (
+                <div key={idx} style={{ position: 'relative', margin: '8px 0' }}>
+                  {idx > 0 && (
+                    <div
                       style={{
-                        fontSize: 11,
-                        background: 'var(--bg-secondary)',
-                        color: 'var(--text-secondary)',
+                        position: 'absolute',
+                        left: 19,
+                        top: -4,
+                        transform: 'translateY(-100%)',
+                        width: 2,
+                        height: 12,
+                        background: 'var(--border)',
                       }}
-                    >
-                      原节点 L{chainNodeLevel}
-                    </span>
+                    />
                   )}
-                  {isMulti && (
-                    <span className="status-badge status-pending" style={{ fontSize: 11 }}>
-                      {records.length} 人并行
-                    </span>
-                  )}
-                  {partialApproved && (
-                    <span
-                      className="status-badge"
-                      style={{
-                        fontSize: 11,
-                        background: 'rgba(255, 193, 7, 0.15)',
-                        color: 'var(--warning)',
-                      }}
-                    >
-                      部分通过
-                    </span>
-                  )}
-                  {canAddSigner && (
-                    <button
-                      className="btn btn-sm btn-outline"
-                      style={{
-                        marginLeft: 8,
-                        fontSize: 12,
-                        padding: '2px 10px',
-                        borderColor: 'var(--primary)',
-                        color: 'var(--primary)',
-                      }}
-                      onClick={() => onAddSigner && onAddSigner(level, records)}
-                    >
-                      ➕ 加签
-                    </button>
-                  )}
-                </div>
-                <div className="chain-level-approvers">
-                  {records.map((rec) => {
-                    const approverState = getApproverState(rec)
-                    const isCurrentUserApprover =
-                      (rec.approver_name === currentUser?.real_name ||
-                       rec.approver_name === currentUser?.username) &&
-                      rec.status === 'pending' &&
-                      rec.transfer_status !== 'transferred'
-                    return (
-                      <div
-                        key={rec.id}
-                        className={`chain-approver-row chain-approver-${approverState}`}
-                        style={{
-                          border: isCurrentUserApprover ? '1px solid var(--primary)' : 'none',
-                          borderRadius: 6,
-                          padding: isCurrentUserApprover ? 6 : 0,
-                          background: isCurrentUserApprover ? 'rgba(13, 110, 253, 0.05)' : 'transparent',
-                        }}
-                      >
-                        <span
-                          className="chain-approver-icon"
+                  <div style={{
+                    display: 'flex',
+                    gap: 12,
+                    overflowX: 'auto',
+                    padding: '12px 0 12px 48px',
+                  }}>
+                    {item.branches.map((branch, bi) => {
+                      const branchColor = BRANCH_COLORS[bi % BRANCH_COLORS.length]
+                      const branchIdx = (branch.records[0]?.branch_index ?? bi)
+                      const allDone = branch.records.every((r) => ['approved', 'rejected', 'escalated', 'transferred'].includes(r.status))
+                      return (
+                        <div
+                          key={branch.branch_id}
                           style={{
-                            width: 6,
-                            height: 6,
-                            borderRadius: '50%',
-                            marginRight: 8,
-                            background: getApproverBadgeColor(approverState),
-                            display: 'inline-block',
+                            flex: '1 1 0',
+                            minWidth: 260,
+                            border: `2px solid ${branchColor}`,
+                            borderRadius: 10,
+                            background: 'var(--bg-primary)',
+                            position: 'relative',
                           }}
-                        />
-                        <div style={{ flex: 1 }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                            <span style={{ fontWeight: 500 }}>{rec.approver_name}</span>
-                            <span className={`status-badge status-${rec.transfer_status === 'transferred' ? 'transferred' : rec.status}`} style={{ fontSize: 11 }}>
-                              {rec.transfer_status === 'transferred' ? '已转审' : STATUS_MAP[rec.status]}
+                        >
+                          <div style={{
+                            padding: '6px 10px',
+                            background: branchColor,
+                            color: '#fff',
+                            borderTopLeftRadius: 8,
+                            borderTopRightRadius: 8,
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center',
+                          }}>
+                            <span style={{ fontWeight: 600, fontSize: 13 }}>分支 {branchIdx + 1}</span>
+                            <span style={{ fontSize: 11, opacity: 0.9 }}>
+                              {allDone ? '✓ 已完成' : '⏳ 进行中'}
                             </span>
-                            {rec.is_added_signer && (
-                              <span
-                                className="status-badge"
-                                style={{
-                                  fontSize: 11,
-                                  background: 'rgba(13, 110, 253, 0.12)',
-                                  color: 'var(--primary)',
-                                }}
-                              >
-                                加签人
-                              </span>
-                            )}
-                            {rec.proxy_source && (
-                              <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
-                                ({rec.proxy_source} 代理)
-                              </span>
-                            )}
-                            {rec.added_signer_by && (
-                              <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
-                                (由 {rec.added_signer_by} 追加)
-                              </span>
-                            )}
-                            {isCurrentUserApprover && (
-                              <>
-                                <span
-                                  className="status-badge"
-                                  style={{
-                                    fontSize: 11,
-                                    background: 'rgba(13, 110, 253, 0.15)',
-                                    color: 'var(--primary)',
-                                  }}
-                                >
-                                  您的待办
-                                </span>
-                                <button
-                                  className="btn btn-sm btn-outline"
-                                  style={{
-                                    marginLeft: 4,
-                                    fontSize: 12,
-                                    padding: '2px 10px',
-                                    borderColor: 'var(--warning)',
-                                    color: 'var(--warning)',
-                                  }}
-                                  onClick={() => onTransfer && onTransfer(rec)}
-                                >
-                                  🔄 转审
-                                </button>
-                              </>
-                            )}
                           </div>
-                          {(rec.opinion || rec.acted_at || rec.transferred_to || rec.added_signer_reason || rec.transfer_reason) && (
-                            <div style={{ marginTop: 4 }}>
-                              {rec.opinion && (
-                                <div className="chain-node-opinion" style={{ marginTop: 0 }}>
-                                  意见: {rec.opinion}
-                                </div>
-                              )}
-                              {rec.transferred_to && (
-                                <div style={{ fontSize: 12, color: 'var(--warning)', marginTop: rec.opinion ? 2 : 0 }}>
-                                  转审给: {rec.transferred_to}
-                                  {rec.transfer_reason && ` (原因: ${rec.transfer_reason})`}
-                                </div>
-                              )}
-                              {rec.transferred_from && rec.status === 'pending' && !rec.transfer_status && (
-                                <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 2 }}>
-                                  转审来自: {rec.transferred_from}
-                                  {rec.transfer_reason && ` (原因: ${rec.transfer_reason})`}
-                                </div>
-                              )}
-                              {rec.added_signer_reason && (
-                                <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 2 }}>
-                                  加签原因: {rec.added_signer_reason}
-                                </div>
-                              )}
-                              {rec.acted_at && (
-                                <div className="chain-node-meta" style={{ fontSize: 12, marginTop: 2 }}>
-                                  处理时间: {formatTime(rec.acted_at)}
-                                </div>
-                              )}
-                            </div>
-                          )}
-                          {approverState === 'current' && !rec.acted_at && (
-                            <div className="chain-node-meta" style={{ color: 'var(--primary)', fontSize: 12, fontWeight: 500 }}>
-                              等待审批中...
-                            </div>
-                          )}
+                          <div style={{ padding: 8 }}>
+                            {(() => {
+                              const grouped = {}
+                              for (const r of branch.records) {
+                                if (!grouped[r.level]) grouped[r.level] = []
+                                grouped[r.level].push(r)
+                              }
+                              const bs = Object.keys(grouped).map(Number).sort((a, b) => a - b)
+                              return bs.map((lv, li) => {
+                                const sub = { ...approval }
+                                return (
+                                  <LevelNodeBlock
+                                    key={lv}
+                                    level={lv}
+                                    records={grouped[lv]}
+                                    approval={sub}
+                                    currentUser={currentUser}
+                                    onAddSigner={onAddSigner}
+                                    onTransfer={onTransfer}
+                                    levelIdx={li}
+                                    totalLevels={bs.length}
+                                    showConnector={li > 0}
+                                  />
+                                )
+                              })
+                            })()}
+                          </div>
                         </div>
-                      </div>
-                    )
-                  })}
+                      )
+                    })}
+                  </div>
                 </div>
-              </div>
-            </div>
-          )
-        })}
-      </div>
+              )
+            }
+            return (
+              <LevelNodeBlock
+                key={idx}
+                level={item.level}
+                records={item.records}
+                approval={approval}
+                currentUser={currentUser}
+                onAddSigner={onAddSigner}
+                onTransfer={onTransfer}
+                levelIdx={idx}
+                totalLevels={levels.length}
+                showConnector={idx > 0}
+              />
+            )
+          })}
+        </div>
+      ) : (
+        <div className="approval-chain-timeline">
+          {levels.map((level, levelIdx) => (
+            <LevelNodeBlock
+              key={level}
+              level={level}
+              records={levelGroups[level]}
+              approval={approval}
+              currentUser={currentUser}
+              onAddSigner={onAddSigner}
+              onTransfer={onTransfer}
+              levelIdx={levelIdx}
+              totalLevels={levels.length}
+              showConnector={levelIdx > 0}
+            />
+          ))}
+        </div>
+      )}
     </div>
   )
 }

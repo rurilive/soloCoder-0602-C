@@ -12,7 +12,7 @@ from app.models import (
     ApprovalChainCondition, ApprovalChainConditionRule,
     ApprovalProxy, ApprovalReminder, ApprovalNodeAction,
     ApprovalNodeActionType, ApprovalRecordType, TransferStatus,
-    TimeoutEscalationStrategy,
+    TimeoutEscalationStrategy, ChainNodeType,
     OperationLog, TaskLock,
     User, Role, UserRole,
     Notification, NotificationType,
@@ -21,6 +21,17 @@ from app.condition_engine import (
     ConditionEvaluationContext,
     resolve_next_level,
     detect_cycle,
+)
+from app.parallel_engine import (
+    parse_parallel_groups,
+    detect_parallel_deadlock,
+    get_parallel_path_levels,
+    check_branch_all_rejected,
+    check_branch_complete,
+    check_parallel_group_ready_to_merge,
+    check_any_branch_rejected,
+    generate_branch_id,
+    generate_parallel_group_id,
 )
 from app.schemas import (
     ApprovalTimelineEvent,
@@ -553,7 +564,7 @@ def create_approval(db: Session, asset_id: int, data: ApprovalCreate, applicant:
     total_levels = 1
 
     chain_nodes_by_level: dict[int, ApprovalChainNode] = {}
-    resolved_path_levels: list[int] = []
+    path_items: list[dict] = []
 
     if chain:
         chain_id = chain.id
@@ -570,8 +581,6 @@ def create_approval(db: Session, asset_id: int, data: ApprovalCreate, applicant:
         for n in all_nodes:
             chain_nodes_by_level[n.level] = n
 
-        all_levels = set(chain_nodes_by_level.keys())
-
         applicant_department = _get_applicant_department(db, data.applicant)
         ctx = ConditionEvaluationContext(
             price=asset.purchase_price,
@@ -579,24 +588,44 @@ def create_approval(db: Session, asset_id: int, data: ApprovalCreate, applicant:
             applicant_department=applicant_department,
         )
 
-        visited: set[int] = set()
-        current_level = 1
-        max_iterations = len(all_levels) * 2 + 10
-        iterations = 0
-        while current_level is not None and current_level in all_levels and iterations < max_iterations:
-            iterations += 1
-            if current_level in visited:
-                logger.warning(
-                    "审批单创建时检测到路径环路，中断路径生成: chain_id=%s, level=%s",
-                    chain.id, current_level,
-                )
-                break
-            visited.add(current_level)
-            resolved_path_levels.append(current_level)
-            node = chain_nodes_by_level[current_level]
-            current_level = resolve_next_level(node, ctx, all_levels)
+        has_parallel = any(n.node_type != ChainNodeType.APPROVAL for n in all_nodes)
 
-        total_levels = len(resolved_path_levels) if resolved_path_levels else 1
+        if has_parallel:
+            path_items = get_parallel_path_levels(all_nodes, ctx) or []
+            approval_count = 0
+            for item in path_items:
+                if item["type"] == "approval":
+                    approval_count += 1
+                elif item["type"] == "branch":
+                    approval_count += len(item.get("nodes", []))
+            total_levels = approval_count if approval_count > 0 else 1
+        else:
+            all_levels = set(chain_nodes_by_level.keys())
+            visited: set[int] = set()
+            current_level = 1
+            max_iterations = len(all_levels) * 2 + 10
+            iterations = 0
+            resolved_path_levels: list[int] = []
+            while current_level is not None and current_level in all_levels and iterations < max_iterations:
+                iterations += 1
+                if current_level in visited:
+                    logger.warning(
+                        "审批单创建时检测到路径环路，中断路径生成: chain_id=%s, level=%s",
+                        chain.id, current_level,
+                    )
+                    break
+                visited.add(current_level)
+                resolved_path_levels.append(current_level)
+                node = chain_nodes_by_level[current_level]
+                current_level = resolve_next_level(node, ctx, all_levels)
+
+            for lv in resolved_path_levels:
+                path_items.append({
+                    "type": "approval",
+                    "level": lv,
+                    "node": chain_nodes_by_level.get(lv),
+                })
+            total_levels = len(resolved_path_levels) if resolved_path_levels else 1
 
     approval = Approval(
         asset_id=asset_id,
@@ -613,19 +642,35 @@ def create_approval(db: Session, asset_id: int, data: ApprovalCreate, applicant:
     db.add(approval)
     db.flush()
 
-    if chain and chain_id and resolved_path_levels:
+    if chain and chain_id and path_items:
         now = datetime.now()
-        for path_idx, level in enumerate(resolved_path_levels):
-            node = chain_nodes_by_level.get(level)
-            if not node or not node.approvers:
+        record_level_counter = 0
+        first_level_nodes: list[int] = []
+
+        def process_approval_item(item: dict, is_parallel_branch: bool = False) -> None:
+            nonlocal record_level_counter
+            node = item.get("node")
+            if not node:
+                return
+            if node.node_type in (ChainNodeType.PARALLEL_START, ChainNodeType.PARALLEL_END):
+                return
+            if not node.approvers:
                 raise HTTPException(
                     status_code=500,
-                    detail=f"审批链节点（level={level}）缺少审批人配置",
+                    detail=f"审批链节点（level={node.level}）缺少审批人配置",
                 )
-            record_level = path_idx + 1
+            record_level_counter += 1
+            record_level = record_level_counter
             timeout_at = None
-            if path_idx == 0 and node.timeout_minutes is not None:
+            if not is_parallel_branch and record_level == 1 and node.timeout_minutes is not None:
                 timeout_at = now + timedelta(minutes=node.timeout_minutes)
+            if is_parallel_branch and node.timeout_minutes is not None:
+                timeout_at = now + timedelta(minutes=node.timeout_minutes)
+
+            group_id = item.get("group_id")
+            branch_id = item.get("branch_id")
+            branch_index = item.get("branch_index")
+
             for approver in node.approvers:
                 record = ApprovalNodeRecord(
                     approval_id=approval.id,
@@ -633,12 +678,24 @@ def create_approval(db: Session, asset_id: int, data: ApprovalCreate, applicant:
                     chain_node_approver_id=approver.id,
                     level=record_level,
                     chain_node_level=node.level,
+                    parallel_group_id=group_id,
+                    branch_id=branch_id,
+                    branch_index=branch_index,
                     approver_role=approver.approver_role,
                     approver_name=approver.approver_name,
                     status=ApprovalStatus.PENDING,
                     timeout_at=timeout_at,
                 )
                 db.add(record)
+            if record_level == 1 or is_parallel_branch:
+                first_level_nodes.append(record_level)
+
+        for item in path_items:
+            if item["type"] == "approval":
+                process_approval_item(item, is_parallel_branch=False)
+            elif item["type"] == "branch":
+                for branch_node in item.get("nodes", []):
+                    process_approval_item(branch_node, is_parallel_branch=True)
 
     action_type = "领用申请" if data.approval_type == ApprovalType.ALLOCATE else "报废申请"
     chain_info = f"（{total_levels}级审批链）" if total_levels > 1 else ""
@@ -1013,6 +1070,142 @@ def _get_next_record_level(db: Session, approval_id: int, current_level: int) ->
     return all_levels[idx + 1]
 
 
+def _get_next_record_level_by_level(db: Session, approval_id: int, chain_end_level: int) -> int | None:
+    all_records = (
+        db.query(ApprovalNodeRecord)
+        .filter(ApprovalNodeRecord.approval_id == approval_id)
+        .order_by(ApprovalNodeRecord.level.asc(), ApprovalNodeRecord.chain_node_level.asc())
+        .all()
+    )
+    found_parallel_end = False
+    for rec in all_records:
+        if found_parallel_end and rec.level is not None and rec.status == ApprovalStatus.PENDING:
+            return rec.level
+        if rec.chain_node_level == chain_end_level:
+            found_parallel_end = True
+    return None
+
+
+def _get_next_record_level_in_branch(db: Session, approval_id: int, current_level: int, branch_id: str) -> int | None:
+    branch_records = (
+        db.query(ApprovalNodeRecord)
+        .filter(
+            ApprovalNodeRecord.approval_id == approval_id,
+            ApprovalNodeRecord.branch_id == branch_id,
+        )
+        .order_by(ApprovalNodeRecord.level.asc())
+        .all()
+    )
+    levels = sorted(list({r.level for r in branch_records}))
+    idx = levels.index(current_level) if current_level in levels else -1
+    if idx < 0 or idx >= len(levels) - 1:
+        return None
+    return levels[idx + 1]
+
+
+def _set_branch_level_timeout(db: Session, approval_id: int, level: int, branch_id: str, context: str = "unknown") -> None:
+    next_records = (
+        db.query(ApprovalNodeRecord)
+        .filter(
+            ApprovalNodeRecord.approval_id == approval_id,
+            ApprovalNodeRecord.level == level,
+            ApprovalNodeRecord.branch_id == branch_id,
+            ApprovalNodeRecord.status == ApprovalStatus.PENDING,
+            _not_transferred_sql(),
+        )
+        .all()
+    )
+    if not next_records:
+        return
+    chain_node = (
+        db.query(ApprovalChainNode)
+        .filter(ApprovalChainNode.id == next_records[0].chain_node_id)
+        .first()
+    )
+    if not chain_node or chain_node.timeout_minutes is None:
+        return
+    new_timeout = datetime.now() + timedelta(minutes=chain_node.timeout_minutes)
+    for record in next_records:
+        if record.timeout_at is not None:
+            logger.warning(
+                "[%s] 审批单#%d 分支节点(branch=%s, level=%d, approver=%s) timeout_at 已存在，重新覆盖",
+                context, approval_id, branch_id, level, record.approver_name,
+            )
+        record.timeout_at = new_timeout
+
+
+def _finish_approval_as_approved(
+    db: Session,
+    approval: Approval,
+    asset: Asset,
+    approver_name: str,
+    approver_id: int | None,
+    opinion: str | None,
+) -> Approval:
+    approval.status = ApprovalStatus.APPROVED
+    approval.approver = approver_name
+    approval.approval_opinion = opinion
+
+    if approval.approval_type == ApprovalType.ALLOCATE:
+        asset.status = AssetStatus.ALLOCATED
+        asset.assignee = approval.assignee
+        action = "领用审批通过"
+        detail = f"审批通过，领用人: {approval.assignee}。{opinion or ''}"
+    elif approval.approval_type == ApprovalType.SCRAP:
+        asset.status = AssetStatus.SCRAPPED
+        asset.assignee = None
+        action = "报废审批通过"
+        detail = f"审批通过。{opinion or ''}"
+    else:
+        action = "审批通过"
+        detail = opinion or ""
+
+    log = AssetLog(
+        asset_id=asset.id,
+        action=action,
+        operator=approver_name,
+        operator_id=approver_id,
+        detail=detail,
+    )
+    db.add(log)
+    db.commit()
+    db.refresh(approval)
+    return approval
+
+
+def _finish_approval_as_rejected(
+    db: Session,
+    approval: Approval,
+    asset: Asset,
+    approver_name: str,
+    approver_id: int | None,
+    opinion: str | None,
+) -> Approval:
+    approval.status = ApprovalStatus.REJECTED
+    approval.approver = approver_name
+    approval.approval_opinion = opinion
+    asset.status = approval.previous_status
+
+    if approval.approval_type == ApprovalType.ALLOCATE:
+        action = "领用审批驳回"
+    elif approval.approval_type == ApprovalType.SCRAP:
+        action = "报废审批驳回"
+    else:
+        action = "审批驳回"
+
+    log = AssetLog(
+        asset_id=asset.id,
+        action=action,
+        operator=approver_name,
+        operator_id=approver_id,
+        detail=opinion or "审批驳回",
+    )
+    db.add(log)
+    db.commit()
+    db.refresh(approval)
+    return approval
+
+
 def _check_proxy_conflict_for_countersign(
     db: Session,
     approver: User,
@@ -1062,33 +1255,30 @@ def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approv
 
     now = datetime.now()
 
-    current_level_records = (
+    all_pending_records = (
         db.query(ApprovalNodeRecord)
         .filter(
             ApprovalNodeRecord.approval_id == approval_id,
-            ApprovalNodeRecord.level == approval.current_level,
+            ApprovalNodeRecord.status == ApprovalStatus.PENDING,
         )
         .with_for_update()
         .all()
     )
 
-    if not current_level_records:
-        raise HTTPException(status_code=400, detail="当前审批节点不存在")
+    if not all_pending_records:
+        raise HTTPException(status_code=400, detail="当前没有待处理的审批节点")
 
     approval.updated_at = datetime.now()
     db.flush()
-
-    node_mode = _get_node_mode(db, current_level_records[0].chain_node_id)
 
     pending_record = None
     is_direct_approver = False
     is_proxy_approver = False
     proxy_principal_name = None
     fuzzy_match_candidate = None
+    node_mode = ApprovalMode.SINGLE
 
-    for record in current_level_records:
-        if record.status != ApprovalStatus.PENDING:
-            continue
+    for record in all_pending_records:
         if record.transfer_status and record.transfer_status == TransferStatus.TRANSFERRED:
             continue
 
@@ -1097,6 +1287,7 @@ def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approv
             if is_approver and is_exact:
                 pending_record = record
                 is_direct_approver = True
+                node_mode = _get_node_mode(db, record.chain_node_id)
                 break
             elif is_approver and not is_exact and fuzzy_match_candidate is None:
                 fuzzy_match_candidate = record
@@ -1104,11 +1295,10 @@ def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approv
     if not pending_record and fuzzy_match_candidate:
         pending_record = fuzzy_match_candidate
         is_direct_approver = True
+        node_mode = _get_node_mode(db, pending_record.chain_node_id)
 
     if not pending_record and approver:
-        for record in current_level_records:
-            if record.status != ApprovalStatus.PENDING:
-                continue
+        for record in all_pending_records:
             if record.transfer_status and record.transfer_status == TransferStatus.TRANSFERRED:
                 continue
 
@@ -1130,12 +1320,14 @@ def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approv
                         if _check_circular_proxy(db, principal.id, approver.id, approval.applicant):
                             raise HTTPException(status_code=400, detail="循环代理检测：代理人同时也是申请人，无法代理审批")
 
-                        if node_mode in (ApprovalMode.ALL_SIGN, ApprovalMode.OR_SIGN):
-                            _check_proxy_conflict_for_countersign(db, approver, approval_id, approval.current_level)
+                        rec_mode = _get_node_mode(db, record.chain_node_id)
+                        if rec_mode in (ApprovalMode.ALL_SIGN, ApprovalMode.OR_SIGN):
+                            _check_proxy_conflict_for_countersign(db, approver, approval_id, record.level)
 
                         pending_record = record
                         is_proxy_approver = True
                         proxy_principal_name = principal.real_name or principal.username
+                        node_mode = rec_mode
                         break
             if pending_record:
                 break
@@ -1164,8 +1356,18 @@ def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approv
         pending_record.actual_approver = approver_name
         pending_record.proxy_source = proxy_principal_name
 
+    same_level_records = (
+        db.query(ApprovalNodeRecord)
+        .filter(
+            ApprovalNodeRecord.approval_id == approval_id,
+            ApprovalNodeRecord.level == pending_record.level,
+        )
+        .with_for_update()
+        .all()
+    )
+
     level_complete = False
-    active_records = _filter_active_records(current_level_records)
+    active_records = _filter_active_records(same_level_records)
     if node_mode == ApprovalMode.SINGLE:
         level_complete = True
     elif node_mode == ApprovalMode.ALL_SIGN:
@@ -1197,11 +1399,86 @@ def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approv
                     r.acted_at = now
             level_complete = True
 
-    next_level = _get_next_record_level(db, approval_id, approval.current_level)
+    if not level_complete:
+        db.commit()
+        db.refresh(approval)
+        return approval
 
-    if level_complete and next_level is not None:
-        approval.current_level = next_level
-        _set_next_level_timeout(db, approval, "approve_approval")
+    approval.updated_at = datetime.now()
+    db.flush()
+
+    is_parallel_branch = pending_record.parallel_group_id is not None and pending_record.branch_id is not None
+    chain = None
+    all_chain_nodes: list[ApprovalChainNode] = []
+
+    if approval.chain_id:
+        chain = db.query(ApprovalChain).filter(ApprovalChain.id == approval.chain_id).first()
+        if chain:
+            all_chain_nodes = (
+                db.query(ApprovalChainNode)
+                .options(joinedload(ApprovalChainNode.approvers))
+                .filter(ApprovalChainNode.chain_id == chain.id)
+                .order_by(ApprovalChainNode.level.asc())
+                .all()
+            )
+
+    all_records = (
+        db.query(ApprovalNodeRecord)
+        .filter(ApprovalNodeRecord.approval_id == approval_id)
+        .all()
+    )
+
+    if is_parallel_branch:
+        group_id = pending_record.parallel_group_id
+        branch_id = pending_record.branch_id
+
+        branch_all_records = [r for r in all_records if r.branch_id == branch_id]
+        branch_chain_nodes = [n for n in all_chain_nodes if n.branch_id == branch_id]
+
+        branch_finished = check_branch_complete(branch_all_records, branch_id, branch_chain_nodes)
+        if branch_finished:
+            for r in branch_all_records:
+                r.branch_complete = True
+
+            if check_branch_all_rejected(all_records, branch_id):
+                return _finish_approval_as_rejected(
+                    db, approval, asset, approver_name, approver_id, data.opinion or "并行分支全部驳回"
+                )
+
+            group_ready = check_parallel_group_ready_to_merge(all_records, group_id, all_chain_nodes)
+            if group_ready:
+                if check_any_branch_rejected(all_records, group_id):
+                    return _finish_approval_as_rejected(
+                        db, approval, asset, approver_name, approver_id, data.opinion or "并行存在驳回分支"
+                    )
+
+                end_node = next((n for n in all_chain_nodes if n.parallel_group_id == group_id and n.node_type == ChainNodeType.PARALLEL_END), None)
+                if end_node:
+                    next_after_parallel = _get_next_record_level_by_level(db, approval_id, end_node.level)
+                    if next_after_parallel is not None:
+                        approval.current_level = next_after_parallel
+                        _set_next_level_timeout(db, approval, "approve_approval_parallel_merge")
+                    else:
+                        return _finish_approval_as_approved(
+                            db, approval, asset, approver_name, approver_id, data.opinion
+                        )
+                else:
+                    next_level = _get_next_record_level(db, approval_id, pending_record.level)
+                    if next_level is not None:
+                        approval.current_level = next_level
+                        _set_next_level_timeout(db, approval, "approve_approval")
+                    else:
+                        return _finish_approval_as_approved(
+                            db, approval, asset, approver_name, approver_id, data.opinion
+                        )
+            else:
+                pass
+        else:
+            next_in_branch = _get_next_record_level_in_branch(
+                db, approval_id, pending_record.level, branch_id
+            )
+            if next_in_branch is not None:
+                _set_branch_level_timeout(db, approval_id, next_in_branch, branch_id, "approve_approval_branch")
 
         mode_desc = {
             ApprovalMode.SINGLE: "单人审批",
@@ -1209,7 +1486,8 @@ def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approv
             ApprovalMode.OR_SIGN: "或签",
         }.get(node_mode, "审批")
 
-        level_desc = f"第{approval.current_level - 1}/{approval.total_levels}级{mode_desc}通过"
+        branch_info = f"，分支{pending_record.branch_index + 1}" if pending_record.branch_index is not None else ""
+        level_desc = f"第{pending_record.level}/{approval.total_levels}级{mode_desc}{branch_info}通过"
         proxy_info = f"（代理审批，代理人: {approver_name}，代原审批人: {pending_record.proxy_source}）" if pending_record.proxy_source else ""
         log = AssetLog(
             asset_id=asset.id,
@@ -1223,38 +1501,33 @@ def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approv
         db.refresh(approval)
         return approval
 
-    if not level_complete:
+    next_level = _get_next_record_level(db, approval_id, pending_record.level)
+
+    if next_level is not None:
+        approval.current_level = next_level
+        _set_next_level_timeout(db, approval, "approve_approval")
+
+        mode_desc = {
+            ApprovalMode.SINGLE: "单人审批",
+            ApprovalMode.ALL_SIGN: "会签",
+            ApprovalMode.OR_SIGN: "或签",
+        }.get(node_mode, "审批")
+
+        level_desc = f"第{pending_record.level}/{approval.total_levels}级{mode_desc}通过"
+        proxy_info = f"（代理审批，代理人: {approver_name}，代原审批人: {pending_record.proxy_source}）" if pending_record.proxy_source else ""
+        log = AssetLog(
+            asset_id=asset.id,
+            action="多级审批通过",
+            operator=approver_name,
+            operator_id=approver_id,
+            detail=f"{level_desc}，审批人: {pending_record.approver_name}{proxy_info}。{data.opinion or ''}",
+        )
+        db.add(log)
         db.commit()
         db.refresh(approval)
         return approval
 
-    approval.status = ApprovalStatus.APPROVED
-    approval.approver = approver_name
-    approval.approval_opinion = data.opinion
-
-    if approval.approval_type == ApprovalType.ALLOCATE:
-        asset.status = AssetStatus.ALLOCATED
-        asset.assignee = approval.assignee
-        action = "领用审批通过"
-        detail = f"审批通过，领用人: {approval.assignee}。{data.opinion or ''}"
-    elif approval.approval_type == ApprovalType.SCRAP:
-        asset.status = AssetStatus.SCRAPPED
-        asset.assignee = None
-        action = "报废审批通过"
-        detail = f"审批通过。{data.opinion or ''}"
-
-    log = AssetLog(
-        asset_id=asset.id,
-        action=action,
-        operator=approver_name,
-        operator_id=approver_id,
-        detail=detail,
-    )
-    db.add(log)
-
-    db.commit()
-    db.refresh(approval)
-    return approval
+    return _finish_approval_as_approved(db, approval, asset, approver_name, approver_id, data.opinion)
 
 
 def reject_approval(db: Session, approval_id: int, data: ApprovalAction, approver: User | None = None) -> Approval:
@@ -1283,33 +1556,30 @@ def reject_approval(db: Session, approval_id: int, data: ApprovalAction, approve
 
     now = datetime.now()
 
-    current_level_records = (
+    all_pending_records = (
         db.query(ApprovalNodeRecord)
         .filter(
             ApprovalNodeRecord.approval_id == approval_id,
-            ApprovalNodeRecord.level == approval.current_level,
+            ApprovalNodeRecord.status == ApprovalStatus.PENDING,
         )
         .with_for_update()
         .all()
     )
 
-    if not current_level_records:
-        raise HTTPException(status_code=400, detail="当前审批节点不存在")
+    if not all_pending_records:
+        raise HTTPException(status_code=400, detail="当前没有待处理的审批节点")
 
     approval.updated_at = datetime.now()
     db.flush()
-
-    node_mode = _get_node_mode(db, current_level_records[0].chain_node_id)
 
     pending_record = None
     is_direct_approver = False
     is_proxy_approver = False
     proxy_principal_name = None
     fuzzy_match_candidate = None
+    node_mode = ApprovalMode.SINGLE
 
-    for record in current_level_records:
-        if record.status != ApprovalStatus.PENDING:
-            continue
+    for record in all_pending_records:
         if record.transfer_status and record.transfer_status == TransferStatus.TRANSFERRED:
             continue
 
@@ -1318,6 +1588,7 @@ def reject_approval(db: Session, approval_id: int, data: ApprovalAction, approve
             if is_approver and is_exact:
                 pending_record = record
                 is_direct_approver = True
+                node_mode = _get_node_mode(db, record.chain_node_id)
                 break
             elif is_approver and not is_exact and fuzzy_match_candidate is None:
                 fuzzy_match_candidate = record
@@ -1325,11 +1596,10 @@ def reject_approval(db: Session, approval_id: int, data: ApprovalAction, approve
     if not pending_record and fuzzy_match_candidate:
         pending_record = fuzzy_match_candidate
         is_direct_approver = True
+        node_mode = _get_node_mode(db, pending_record.chain_node_id)
 
     if not pending_record and approver:
-        for record in current_level_records:
-            if record.status != ApprovalStatus.PENDING:
-                continue
+        for record in all_pending_records:
             if record.transfer_status and record.transfer_status == TransferStatus.TRANSFERRED:
                 continue
 
@@ -1351,12 +1621,14 @@ def reject_approval(db: Session, approval_id: int, data: ApprovalAction, approve
                         if _check_circular_proxy(db, principal.id, approver.id, approval.applicant):
                             raise HTTPException(status_code=400, detail="循环代理检测：代理人同时也是申请人，无法代理审批")
 
-                        if node_mode in (ApprovalMode.ALL_SIGN, ApprovalMode.OR_SIGN):
-                            _check_proxy_conflict_for_countersign(db, approver, approval_id, approval.current_level)
+                        rec_mode = _get_node_mode(db, record.chain_node_id)
+                        if rec_mode in (ApprovalMode.ALL_SIGN, ApprovalMode.OR_SIGN):
+                            _check_proxy_conflict_for_countersign(db, approver, approval_id, record.level)
 
                         pending_record = record
                         is_proxy_approver = True
                         proxy_principal_name = principal.real_name or principal.username
+                        node_mode = rec_mode
                         break
             if pending_record:
                 break
@@ -1388,57 +1660,73 @@ def reject_approval(db: Session, approval_id: int, data: ApprovalAction, approve
         pending_record.actual_approver = approver_name
         pending_record.proxy_source = proxy_principal_name
 
+    same_level_records = (
+        db.query(ApprovalNodeRecord)
+        .filter(
+            ApprovalNodeRecord.approval_id == approval_id,
+            ApprovalNodeRecord.level == pending_record.level,
+        )
+        .with_for_update()
+        .all()
+    )
+
     db.flush()
-    for r in current_level_records:
+    for r in same_level_records:
         if r is not pending_record:
             db.refresh(r)
         if r.status == ApprovalStatus.PENDING:
             r.status = ApprovalStatus.REJECTED
-            r.opinion = f"会签节点被驳回：{data.opinion or '无意见'}"
+            r.opinion = f"节点被驳回：{data.opinion or '无意见'}"
             r.acted_at = now
+
+    is_parallel_branch = pending_record.parallel_group_id is not None and pending_record.branch_id is not None
+
+    all_records = (
+        db.query(ApprovalNodeRecord)
+        .filter(ApprovalNodeRecord.approval_id == approval_id)
+        .all()
+    )
+
+    if is_parallel_branch:
+        branch_id = pending_record.branch_id
+        if check_branch_all_rejected(all_records, branch_id):
+            return _finish_approval_as_rejected(
+                db, approval, asset, approver_name, approver_id, data.opinion or f"并行分支全部驳回"
+            )
+
+        mode_desc = {
+            ApprovalMode.SINGLE: "单人审批",
+            ApprovalMode.ALL_SIGN: "会签",
+            ApprovalMode.OR_SIGN: "或签",
+        }.get(node_mode, "审批")
+        branch_info = f"，分支{pending_record.branch_index + 1}" if pending_record.branch_index is not None else ""
+        level_info = f"（第{pending_record.level}/{approval.total_levels}级{mode_desc}{branch_info}驳回）"
+        proxy_info = f"（代理审批，代理人: {approver_name}，代原审批人: {pending_record.proxy_source}）" if pending_record.proxy_source else ""
+        action_type = "领用" if approval.approval_type == ApprovalType.ALLOCATE else "报废"
+        log = AssetLog(
+            asset_id=asset.id,
+            action=f"{action_type}审批节点驳回",
+            operator=approver_name,
+            operator_id=approver_id,
+            detail=f"审批节点驳回{level_info}{proxy_info}。{data.opinion or ''}",
+        )
+        db.add(log)
+        db.commit()
+        db.refresh(approval)
+        return approval
 
     remaining_records = (
         db.query(ApprovalNodeRecord)
         .filter(
             ApprovalNodeRecord.approval_id == approval_id,
-            ApprovalNodeRecord.level > approval.current_level,
+            ApprovalNodeRecord.level > pending_record.level,
         )
         .all()
     )
     for r in remaining_records:
         r.status = ApprovalStatus.REJECTED
 
-    approval.status = ApprovalStatus.REJECTED
-    approval.approver = approver_name
-    approval.approval_opinion = data.opinion
-
-    asset.status = approval.previous_status
-
-    action_type = "领用" if approval.approval_type == ApprovalType.ALLOCATE else "报废"
-    mode_desc = {
-        ApprovalMode.SINGLE: "单人审批",
-        ApprovalMode.ALL_SIGN: "会签",
-        ApprovalMode.OR_SIGN: "或签",
-    }.get(node_mode, "审批")
-    level_info = f"（第{approval.current_level}/{approval.total_levels}级{mode_desc}驳回）" if approval.total_levels > 1 else ""
-    proxy_info = ""
-    if pending_record.proxy_source:
-        proxy_info = f"（代理审批，代理人: {approver_name}，代原审批人: {pending_record.proxy_source}）"
-    action = f"{action_type}审批驳回"
-    detail = f"审批驳回{level_info}{proxy_info}。{data.opinion or ''}"
-
-    log = AssetLog(
-        asset_id=asset.id,
-        action=action,
-        operator=approver_name,
-        operator_id=approver_id,
-        detail=detail,
-    )
-    db.add(log)
-
-    db.commit()
-    db.refresh(approval)
-    return approval
+    return _finish_approval_as_rejected(db, approval, asset, approver_name, approver_id, data.opinion)
 
 
 def withdraw_approval(db: Session, approval_id: int, reason: str | None = None, applicant: User | None = None) -> Approval:
@@ -2666,6 +2954,10 @@ def _build_temp_nodes_for_cycle_check(data_nodes: list) -> list:
             id=idx,
             chain_id=0,
             level=level,
+            node_type=getattr(node_data, "node_type", ChainNodeType.APPROVAL),
+            parallel_group_id=getattr(node_data, "parallel_group_id", None),
+            branch_id=getattr(node_data, "branch_id", None),
+            branch_index=getattr(node_data, "branch_index", None),
             mode=node_data.mode,
             timeout_minutes=node_data.timeout_minutes,
             default_next_level=getattr(node_data, "default_next_level", None),
@@ -2687,6 +2979,13 @@ def create_approval_chain(db: Session, data: ApprovalChainCreate) -> ApprovalCha
             detail=f"审批链存在环路：{cycle_str}，请检查条件分支配置",
         )
 
+    parallel_errors = detect_parallel_deadlock(temp_nodes)
+    if parallel_errors:
+        raise HTTPException(
+            status_code=400,
+            detail=f"并行网关配置错误：{'; '.join(parallel_errors)}",
+        )
+
     chain = ApprovalChain(
         name=data.name,
         approval_type=data.approval_type,
@@ -2698,14 +2997,21 @@ def create_approval_chain(db: Session, data: ApprovalChainCreate) -> ApprovalCha
     db.flush()
 
     for idx, node_data in enumerate(data.nodes):
-        if not node_data.approvers:
+        node_type = getattr(node_data, "node_type", ChainNodeType.APPROVAL)
+        is_gateway = node_type in (ChainNodeType.PARALLEL_START, ChainNodeType.PARALLEL_END)
+
+        if not is_gateway and not node_data.approvers:
             raise HTTPException(status_code=400, detail=f"第{idx + 1}级节点至少需要指定一个审批人")
-        if node_data.mode == ApprovalMode.SINGLE and len(node_data.approvers) != 1:
+        if not is_gateway and node_data.mode == ApprovalMode.SINGLE and len(node_data.approvers) != 1:
             raise HTTPException(status_code=400, detail=f"单人审批模式（第{idx + 1}级）只能指定一个审批人")
 
         node = ApprovalChainNode(
             chain_id=chain.id,
             level=idx + 1,
+            node_type=node_type,
+            parallel_group_id=getattr(node_data, "parallel_group_id", None),
+            branch_id=getattr(node_data, "branch_id", None),
+            branch_index=getattr(node_data, "branch_index", None),
             mode=node_data.mode,
             timeout_minutes=node_data.timeout_minutes,
             default_next_level=node_data.default_next_level,
@@ -2715,13 +3021,14 @@ def create_approval_chain(db: Session, data: ApprovalChainCreate) -> ApprovalCha
         db.add(node)
         db.flush()
 
-        for approver_data in node_data.approvers:
-            approver = ApprovalChainNodeApprover(
-                chain_node_id=node.id,
-                approver_role=approver_data.approver_role,
-                approver_name=approver_data.approver_name,
-            )
-            db.add(approver)
+        if not is_gateway:
+            for approver_data in node_data.approvers:
+                approver = ApprovalChainNodeApprover(
+                    chain_node_id=node.id,
+                    approver_role=approver_data.approver_role,
+                    approver_name=approver_data.approver_name,
+                )
+                db.add(approver)
 
         if node_data.conditions:
             _save_node_conditions(db, node.id, node_data.conditions)
@@ -2792,6 +3099,13 @@ def update_approval_chain(db: Session, chain_id: int, data: ApprovalChainUpdate)
                 detail=f"审批链存在环路：{cycle_str}，请检查条件分支配置",
             )
 
+        parallel_errors = detect_parallel_deadlock(temp_nodes)
+        if parallel_errors:
+            raise HTTPException(
+                status_code=400,
+                detail=f"并行网关配置错误：{'; '.join(parallel_errors)}",
+            )
+
         existing_node_ids = [
             n.id for n in db.query(ApprovalChainNode.id)
             .filter(ApprovalChainNode.chain_id == chain_id).all()
@@ -2816,14 +3130,21 @@ def update_approval_chain(db: Session, chain_id: int, data: ApprovalChainUpdate)
             ).delete()
 
         for idx, node_data in enumerate(data.nodes):
-            if not node_data.approvers:
+            node_type = getattr(node_data, "node_type", ChainNodeType.APPROVAL)
+            is_gateway = node_type in (ChainNodeType.PARALLEL_START, ChainNodeType.PARALLEL_END)
+
+            if not is_gateway and not node_data.approvers:
                 raise HTTPException(status_code=400, detail=f"第{idx + 1}级节点至少需要指定一个审批人")
-            if node_data.mode == ApprovalMode.SINGLE and len(node_data.approvers) != 1:
+            if not is_gateway and node_data.mode == ApprovalMode.SINGLE and len(node_data.approvers) != 1:
                 raise HTTPException(status_code=400, detail=f"单人审批模式（第{idx + 1}级）只能指定一个审批人")
 
             node = ApprovalChainNode(
                 chain_id=chain_id,
                 level=idx + 1,
+                node_type=node_type,
+                parallel_group_id=getattr(node_data, "parallel_group_id", None),
+                branch_id=getattr(node_data, "branch_id", None),
+                branch_index=getattr(node_data, "branch_index", None),
                 mode=node_data.mode,
                 timeout_minutes=node_data.timeout_minutes,
                 default_next_level=node_data.default_next_level,
@@ -2833,13 +3154,14 @@ def update_approval_chain(db: Session, chain_id: int, data: ApprovalChainUpdate)
             db.add(node)
             db.flush()
 
-            for approver_data in node_data.approvers:
-                approver = ApprovalChainNodeApprover(
-                    chain_node_id=node.id,
-                    approver_role=approver_data.approver_role,
-                    approver_name=approver_data.approver_name,
-                )
-                db.add(approver)
+            if not is_gateway:
+                for approver_data in node_data.approvers:
+                    approver = ApprovalChainNodeApprover(
+                        chain_node_id=node.id,
+                        approver_role=approver_data.approver_role,
+                        approver_name=approver_data.approver_name,
+                    )
+                    db.add(approver)
 
             if node_data.conditions:
                 _save_node_conditions(db, node.id, node_data.conditions)
@@ -3069,25 +3391,26 @@ def _process_timeouts_internal(db: Session) -> list[dict]:
         .all()
     )
 
-    grouped: dict[tuple[int, int], list[ApprovalNodeRecord]] = {}
+    grouped: dict[tuple[int, int, str | None], list[ApprovalNodeRecord]] = {}
     for record in timed_out_records:
-        key = (record.approval_id, record.level)
+        key = (record.approval_id, record.level, record.branch_id)
         if key not in grouped:
             grouped[key] = []
         grouped[key].append(record)
 
     processed = []
-    processed_keys: set[tuple[int, int]] = set()
+    processed_keys: set[tuple[int, int, str | None]] = set()
 
-    for (approval_id, level), records in grouped.items():
-        if (approval_id, level) in processed_keys:
+    for (approval_id, level, branch_id), records in grouped.items():
+        if (approval_id, level, branch_id) in processed_keys:
             continue
 
         approval = db.query(Approval).filter(Approval.id == approval_id).first()
         if not approval or approval.status != ApprovalStatus.PENDING:
             continue
 
-        if approval.current_level != level:
+        is_parallel_branch = branch_id is not None
+        if not is_parallel_branch and approval.current_level != level:
             continue
 
         asset = db.query(Asset).filter(Asset.id == approval.asset_id).first()
@@ -3100,21 +3423,35 @@ def _process_timeouts_internal(db: Session) -> list[dict]:
         if not pending_records:
             continue
 
-        lock_result = db.execute(
-            text(
+        if is_parallel_branch:
+            lock_sql = (
+                "UPDATE approvals SET processing_lock = :lock_id, processing_locked_at = :now "
+                "WHERE id = :approval_id AND status = :status "
+                "AND (processing_lock IS NULL OR processing_locked_at < :stale_threshold)"
+            )
+            lock_params = {
+                "lock_id": worker_id,
+                "now": now,
+                "approval_id": approval_id,
+                "status": ApprovalStatus.PENDING.name,
+                "stale_threshold": stale_threshold,
+            }
+        else:
+            lock_sql = (
                 "UPDATE approvals SET processing_lock = :lock_id, processing_locked_at = :now "
                 "WHERE id = :approval_id AND status = :status AND current_level = :level "
                 "AND (processing_lock IS NULL OR processing_locked_at < :stale_threshold)"
-            ),
-            {
+            )
+            lock_params = {
                 "lock_id": worker_id,
                 "now": now,
                 "approval_id": approval_id,
                 "status": ApprovalStatus.PENDING.name,
                 "level": level,
                 "stale_threshold": stale_threshold,
-            },
-        )
+            }
+
+        lock_result = db.execute(text(lock_sql), lock_params)
         db.flush()
 
         if lock_result.rowcount != 1:
@@ -3164,13 +3501,66 @@ def _process_timeouts_internal(db: Session) -> list[dict]:
                     record.acted_at = now
                     record.opinion = "审批超时，自动升级"
 
-            next_level, cycle_reason = _escalation_resolve_target_level(
-                db, approval, pending_records[0].chain_node_level, escalation_strategy, escalation_target
-            )
+            if is_parallel_branch:
+                if escalation_strategy == TimeoutEscalationStrategy.AUTO_REJECT:
+                    all_records = (
+                        db.query(ApprovalNodeRecord)
+                        .filter(ApprovalNodeRecord.approval_id == approval.id)
+                        .all()
+                    )
+                    if check_branch_all_rejected(all_records, branch_id):
+                        approval.status = ApprovalStatus.REJECTED
+                        approval.approver = "系统"
+                        approval.approval_opinion = "并行分支超时全部驳回"
+                        asset.status = approval.previous_status
+                        remaining_pending = [
+                            r for r in all_records
+                            if r.status == ApprovalStatus.PENDING and _is_active_record(r)
+                        ]
+                        for r in remaining_pending:
+                            r.status = ApprovalStatus.REJECTED
+                        log = AssetLog(
+                            asset_id=asset.id,
+                            action="审批超时驳回",
+                            operator="系统",
+                            operator_id=None,
+                            detail=f"并行分支{branch_id}超时全部驳回，审批单驳回",
+                        )
+                        db.add(log)
+                        db.execute(
+                            text(
+                                "UPDATE approvals SET processing_lock = NULL, processing_locked_at = NULL "
+                                "WHERE id = :approval_id AND processing_lock = :lock_id"
+                            ),
+                            {"approval_id": approval_id, "lock_id": worker_id},
+                        )
+                        db.flush()
+                        savepoint.commit()
+                        result_entry = {
+                            "approval_id": approval.id,
+                            "level": level,
+                            "branch_id": branch_id,
+                            "action": "rejected",
+                            "reason": "并行分支超时全部驳回",
+                        }
+                        if result_entry is not None:
+                            processed.append(result_entry)
+                        processed_keys.add((approval_id, level, branch_id))
+                        continue
+
+                next_level = _get_next_record_level_in_branch(db, approval.id, level, branch_id)
+                cycle_reason = None
+            else:
+                next_level, cycle_reason = _escalation_resolve_target_level(
+                    db, approval, pending_records[0].chain_node_level, escalation_strategy, escalation_target
+                )
 
             if next_level is not None:
-                approval.current_level = next_level
-                _set_next_level_timeout(db, approval, "check_and_process_timeouts")
+                if is_parallel_branch:
+                    _set_branch_level_timeout(db, approval.id, next_level, branch_id, "check_and_process_timeouts_branch")
+                else:
+                    approval.current_level = next_level
+                    _set_next_level_timeout(db, approval, "check_and_process_timeouts")
 
                 mode_desc = {
                     ApprovalMode.SINGLE: "单人审批",
@@ -3184,12 +3574,14 @@ def _process_timeouts_internal(db: Session) -> list[dict]:
                     TimeoutEscalationStrategy.AUTO_REJECT: "驳回",
                 }.get(escalation_strategy, "升级")
 
+                branch_info = f"，分支{records[0].branch_index + 1}" if is_parallel_branch and records[0].branch_index is not None else ""
+
                 log = AssetLog(
                     asset_id=asset.id,
                     action="审批超时升级" if escalation_strategy != TimeoutEscalationStrategy.SKIP_NODE else "审批超时跳过",
                     operator="系统",
                     operator_id=None,
-                    detail=f"第{level}/{approval.total_levels}级{mode_desc}超时，{strategy_desc}到第{next_level}级（{strategy_desc}{len(pending_records)}人）",
+                    detail=f"第{level}/{approval.total_levels}级{mode_desc}{branch_info}超时，{strategy_desc}到第{next_level}级（{strategy_desc}{len(pending_records)}人）",
                 )
                 db.add(log)
 
@@ -3197,19 +3589,35 @@ def _process_timeouts_internal(db: Session) -> list[dict]:
                     module="approval",
                     action="timeout_escalate" if escalation_strategy != TimeoutEscalationStrategy.SKIP_NODE else "timeout_skip",
                     operator="系统",
-                    detail=f"审批单#{approval.id}第{level}级{mode_desc}超时，{strategy_desc}到第{next_level}级（{strategy_desc}{len(pending_records)}人）",
+                    detail=f"审批单#{approval.id}第{level}级{mode_desc}{branch_info}超时，{strategy_desc}到第{next_level}级（{strategy_desc}{len(pending_records)}人）",
                 )
                 db.add(op_log)
 
                 result_entry = {
                     "approval_id": approval.id,
                     "level": level,
+                    "branch_id": branch_id,
                     "action": "escalated" if escalation_strategy == TimeoutEscalationStrategy.ESCALATE_TO_LEVEL else "skipped",
                     "new_level": next_level,
                     "escalated_count": len(pending_records),
                     "strategy": escalation_strategy.value,
                 }
             else:
+                if is_parallel_branch:
+                    db.execute(
+                        text(
+                            "UPDATE approvals SET processing_lock = NULL, processing_locked_at = NULL "
+                            "WHERE id = :approval_id AND processing_lock = :lock_id"
+                        ),
+                        {"approval_id": approval_id, "lock_id": worker_id},
+                    )
+                    db.flush()
+                    savepoint.commit()
+                    if result_entry is not None:
+                        processed.append(result_entry)
+                    processed_keys.add((approval_id, level, branch_id))
+                    continue
+
                 if cycle_reason:
                     final_reason = cycle_reason
                 elif escalation_strategy == TimeoutEscalationStrategy.AUTO_REJECT:
@@ -3278,7 +3686,7 @@ def _process_timeouts_internal(db: Session) -> list[dict]:
 
         if result_entry is not None:
             processed.append(result_entry)
-        processed_keys.add((approval_id, level))
+        processed_keys.add((approval_id, level, branch_id))
 
     if processed:
         db.commit()
