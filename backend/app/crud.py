@@ -704,10 +704,13 @@ def create_approval(db: Session, asset_id: int, data: ApprovalCreate, applicant:
             if has_parallel:
                 path_items = get_parallel_path_levels(all_nodes, ctx) or []
                 approval_count = 0
-                for item in path_items:
-                    if item["type"] == "approval":
+
+                def _expand_sub_process_in_path_items(items: list[dict], nesting_level: int, visited_chain_set: set[int]) -> list[dict]:
+                    nonlocal approval_count
+                    expanded = []
+                    for item in items:
                         node = item.get("node")
-                        if node and node.node_type == ChainNodeType.SUB_PROCESS and node.sub_process_chain_id:
+                        if item["type"] == "approval" and node and node.node_type == ChainNodeType.SUB_PROCESS and node.sub_process_chain_id:
                             sub_nodes = (
                                 db.query(ApprovalChainNode)
                                 .options(
@@ -721,33 +724,51 @@ def create_approval(db: Session, asset_id: int, data: ApprovalCreate, applicant:
                                 .all()
                             )
                             if sub_nodes:
+                                expanded.append({
+                                    "type": "sub_process_start",
+                                    "level": item.get("level"),
+                                    "node": node,
+                                    "nesting_level": nesting_level,
+                                    **{k: item.get(k) for k in ("branch_id", "branch_index", "group_id") if item.get(k) is not None},
+                                })
                                 sub_path, sub_count = _resolve_path_with_sub_process(
-                                    sub_nodes, ctx, 1, {chain.id})
-                                approval_count += sub_count
-                        else:
-                            approval_count += 1
-                    elif item["type"] == "branch":
-                        for bn in item.get("nodes", []):
-                            bnode = bn.get("node")
-                            if bnode and bnode.node_type == ChainNodeType.SUB_PROCESS and bnode.sub_process_chain_id:
-                                sub_nodes = (
-                                    db.query(ApprovalChainNode)
-                                    .options(
-                                        joinedload(ApprovalChainNode.approvers),
-                                        joinedload(ApprovalChainNode.conditions).joinedload(
-                                            ApprovalChainCondition.rules
-                                        ),
-                                    )
-                                    .filter(ApprovalChainNode.chain_id == bnode.sub_process_chain_id)
-                                    .order_by(ApprovalChainNode.level.asc())
-                                    .all()
+                                    sub_nodes, ctx, nesting_level + 1, visited_chain_set.copy()
                                 )
-                                if sub_nodes:
-                                    sub_path, sub_count = _resolve_path_with_sub_process(
-                                        sub_nodes, ctx, 1, {chain.id})
-                                    approval_count += sub_count
+                                for sub_item in sub_path:
+                                    sub_item["parent_node_id"] = node.id
+                                    sub_item["nesting_level"] = nesting_level + 1
+                                    for k in ("branch_id", "branch_index", "group_id"):
+                                        if item.get(k) is not None and k not in sub_item:
+                                            sub_item[k] = item[k]
+                                expanded.extend(sub_path)
+                                approval_count += sub_count
+                                expanded.append({
+                                    "type": "sub_process_end",
+                                    "level": item.get("level"),
+                                    "node": node,
+                                    "nesting_level": nesting_level,
+                                    **{k: item.get(k) for k in ("branch_id", "branch_index", "group_id") if item.get(k) is not None},
+                                })
                             else:
                                 approval_count += 1
+                                expanded.append(item)
+                        elif item["type"] == "branch":
+                            branch_nodes = item.get("nodes", [])
+                            expanded_branch_nodes = _expand_sub_process_in_path_items(branch_nodes, nesting_level + 1, visited_chain_set)
+                            expanded.append({
+                                "type": "branch",
+                                "branch_id": item.get("branch_id"),
+                                "branch_index": item.get("branch_index"),
+                                "group_id": item.get("group_id"),
+                                "nodes": expanded_branch_nodes,
+                            })
+                        else:
+                            if item["type"] == "approval":
+                                approval_count += 1
+                            expanded.append(item)
+                    return expanded
+
+                path_items = _expand_sub_process_in_path_items(path_items, 0, {chain.id})
                 total_levels = approval_count if approval_count > 0 else 1
             else:
                 path_items, total_count = _resolve_path_with_sub_process(all_nodes, ctx, 0, {chain.id})
@@ -827,12 +848,19 @@ def create_approval(db: Session, asset_id: int, data: ApprovalCreate, applicant:
                 if parent_record_stack:
                     parent_record_id = parent_record_stack[-1].id
 
+                sp_group_id = item.get("group_id")
+                sp_branch_id = item.get("branch_id")
+                sp_branch_index = item.get("branch_index")
+
                 record = ApprovalNodeRecord(
                     approval_id=approval.id,
                     chain_node_id=node.id,
                     chain_node_approver_id=None,
                     level=record_level,
                     chain_node_level=node.level,
+                    parallel_group_id=sp_group_id,
+                    branch_id=sp_branch_id,
+                    branch_index=sp_branch_index,
                     approver_role="sub_process",
                     approver_name=f"子流程: {sub_chain_name}",
                     status=ApprovalStatus.PENDING,
@@ -912,7 +940,8 @@ def create_approval(db: Session, asset_id: int, data: ApprovalCreate, applicant:
                 for branch_node in item.get("nodes", []):
                     process_approval_item(branch_node, is_parallel_branch=True)
             elif item["type"] in ("sub_process_start", "sub_process_end"):
-                process_approval_item(item, is_parallel_branch=False)
+                is_branch = item.get("branch_id") is not None or item.get("group_id") is not None
+                process_approval_item(item, is_parallel_branch=is_branch)
 
     action_type = "领用申请" if data.approval_type == ApprovalType.ALLOCATE else "报废申请"
     chain_info = f"（{total_levels}级审批链）" if total_levels > 1 else ""
@@ -2614,7 +2643,6 @@ def get_approval_node_records(db: Session, approval_id: int) -> list:
     records = (
         db.query(ApprovalNodeRecord)
         .options(
-            joinedload(ApprovalNodeRecord.actions),
             joinedload(ApprovalNodeRecord.sub_process_approval),
         )
         .filter(ApprovalNodeRecord.approval_id == approval_id)
@@ -3620,7 +3648,11 @@ def delete_approval_chain(db: Session, chain_id: int) -> None:
 def reorder_chain_nodes(db: Session, chain_id: int, data: ChainNodesReorder) -> ApprovalChain:
     chain = get_approval_chain(db, chain_id)
 
-    existing_nodes = get_chain_nodes(db, chain_id)
+    existing_nodes = (
+        db.query(ApprovalChainNode)
+        .filter(ApprovalChainNode.chain_id == chain_id)
+        .all()
+    )
     existing_ids = {n.id for n in existing_nodes}
 
     if set(data.node_ids) != existing_ids:

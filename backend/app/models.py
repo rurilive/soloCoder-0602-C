@@ -247,6 +247,8 @@ class ApprovalNodeRecord(Base):
     sub_process_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("approvals.id"), nullable=True)
     sub_process_nesting_level: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     parent_record_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("approval_node_records.id"), nullable=True)
+    node_type: Mapped[ChainNodeType | None] = mapped_column(Enum(ChainNodeType), nullable=True)
+    sub_process_chain_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("approval_chains.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
 
     source_record: Mapped["ApprovalNodeRecord | None"] = relationship("ApprovalNodeRecord", remote_side=[id], foreign_keys=[source_record_id])
