@@ -93,6 +93,19 @@ function getApproverState(record) {
   return 'pending'
 }
 
+function getEscalationBadgeText(rec) {
+  const triggerPrefix = rec.escalation_trigger === 'reminder' ? '催办' : '超时'
+  switch (rec.escalation_strategy) {
+    case 'skip_node':
+      return `${triggerPrefix}跳过`
+    case 'auto_reject':
+      return `${triggerPrefix}自动驳回`
+    case 'escalate_to_level':
+    default:
+      return `${triggerPrefix}升级`
+  }
+}
+
 function NodeIcon({ state }) {
   if (state === 'approved') {
     return (
@@ -197,7 +210,7 @@ function ApproverRow({ rec, currentUser, onTransfer }) {
                 color: 'var(--warning)',
               }}
             >
-              ⬆️ 超时升级
+              ⬆️ {getEscalationBadgeText(rec)}
             </span>
           )}
           {rec.is_added_signer && (

@@ -4,7 +4,7 @@ from app.models import (
     AssetStatus, AssetCategory, ApprovalType, ApprovalStatus, NotificationType, ApprovalMode,
     ConditionOperator, ConditionField, ConditionLogic,
     ApprovalNodeActionType, ApprovalRecordType, TransferStatus,
-    TimeoutEscalationStrategy, ChainNodeType,
+    TimeoutEscalationStrategy, EscalationTrigger, ChainNodeType,
 )
 
 
@@ -202,6 +202,8 @@ class ApprovalNodeRecordResponse(BaseModel):
     acted_at: datetime | None
     timeout_at: datetime | None = None
     is_escalated: bool = False
+    escalation_strategy: TimeoutEscalationStrategy | None = None
+    escalation_trigger: EscalationTrigger | None = None
     actual_approver: str | None = None
     proxy_source: str | None = None
     record_type: ApprovalRecordType = ApprovalRecordType.NORMAL

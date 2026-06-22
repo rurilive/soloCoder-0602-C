@@ -12,7 +12,7 @@ from app.models import (
     ApprovalChainCondition, ApprovalChainConditionRule,
     ApprovalProxy, ApprovalReminder, ApprovalNodeAction,
     ApprovalNodeActionType, ApprovalRecordType, TransferStatus,
-    TimeoutEscalationStrategy, ChainNodeType,
+    TimeoutEscalationStrategy, EscalationTrigger, ChainNodeType,
     OperationLog, TaskLock,
     User, Role, UserRole,
     Notification, NotificationType,
@@ -2448,6 +2448,8 @@ def _trigger_escalation_by_reminder(
             if record.status == ApprovalStatus.PENDING:
                 record.status = ApprovalStatus.ESCALATED
                 record.is_escalated = True
+                record.escalation_strategy = escalation_strategy
+                record.escalation_trigger = EscalationTrigger.REMINDER
                 record.acted_at = now
                 record.opinion = f"催办{node_reminder_count}次未响应，跳过当前节点"
         all_level_records = (
@@ -2463,6 +2465,8 @@ def _trigger_escalation_by_reminder(
                 if r not in pending_records:
                     r.status = ApprovalStatus.ESCALATED
                     r.is_escalated = True
+                    r.escalation_strategy = escalation_strategy
+                    r.escalation_trigger = EscalationTrigger.REMINDER
                     r.acted_at = now
                     r.opinion = "会签节点跳过：其他审批人催办超时"
     elif escalation_strategy == TimeoutEscalationStrategy.AUTO_REJECT:
@@ -2470,6 +2474,8 @@ def _trigger_escalation_by_reminder(
             if record.status == ApprovalStatus.PENDING:
                 record.status = ApprovalStatus.REJECTED
                 record.is_escalated = True
+                record.escalation_strategy = escalation_strategy
+                record.escalation_trigger = EscalationTrigger.REMINDER
                 record.acted_at = now
                 record.opinion = f"催办{node_reminder_count}次未响应，策略配置为自动驳回"
     else:
@@ -2477,6 +2483,8 @@ def _trigger_escalation_by_reminder(
             if record.status == ApprovalStatus.PENDING:
                 record.status = ApprovalStatus.ESCALATED
                 record.is_escalated = True
+                record.escalation_strategy = escalation_strategy
+                record.escalation_trigger = EscalationTrigger.REMINDER
                 record.acted_at = now
                 record.opinion = f"催办{node_reminder_count}次未响应，自动升级"
 
@@ -3294,12 +3302,13 @@ def build_approval_timeline(
 
                 if record.is_escalated:
                     event_type = "escalate"
-                    if record.status == ApprovalStatus.REJECTED:
-                        event_type_cn = "超时自动驳回"
-                    elif "跳过" in (record.opinion or ""):
-                        event_type_cn = "超时跳过"
+                    trigger_prefix = "催办" if record.escalation_trigger == EscalationTrigger.REMINDER else "超时"
+                    if record.escalation_strategy == TimeoutEscalationStrategy.SKIP_NODE:
+                        event_type_cn = f"{trigger_prefix}跳过"
+                    elif record.escalation_strategy == TimeoutEscalationStrategy.AUTO_REJECT:
+                        event_type_cn = f"{trigger_prefix}自动驳回"
                     else:
-                        event_type_cn = "超时升级"
+                        event_type_cn = f"{trigger_prefix}升级"
 
                 events.append(
                     ApprovalTimelineEvent(
@@ -3995,6 +4004,8 @@ def _process_timeouts_internal(db: Session) -> list[dict]:
                 for record in pending_records:
                     record.status = ApprovalStatus.ESCALATED
                     record.is_escalated = True
+                    record.escalation_strategy = escalation_strategy
+                    record.escalation_trigger = EscalationTrigger.TIMEOUT
                     record.acted_at = now
                     record.opinion = "审批超时，跳过当前节点"
                 all_level_records = (
@@ -4010,18 +4021,24 @@ def _process_timeouts_internal(db: Session) -> list[dict]:
                         if r not in pending_records:
                             r.status = ApprovalStatus.ESCALATED
                             r.is_escalated = True
+                            r.escalation_strategy = escalation_strategy
+                            r.escalation_trigger = EscalationTrigger.TIMEOUT
                             r.acted_at = now
                             r.opinion = "会签节点跳过：其他审批人超时"
             elif escalation_strategy == TimeoutEscalationStrategy.AUTO_REJECT:
                 for record in pending_records:
                     record.status = ApprovalStatus.REJECTED
                     record.is_escalated = True
+                    record.escalation_strategy = escalation_strategy
+                    record.escalation_trigger = EscalationTrigger.TIMEOUT
                     record.acted_at = now
                     record.opinion = "审批超时，策略配置为自动驳回"
             else:
                 for record in pending_records:
                     record.status = ApprovalStatus.ESCALATED
                     record.is_escalated = True
+                    record.escalation_strategy = escalation_strategy
+                    record.escalation_trigger = EscalationTrigger.TIMEOUT
                     record.acted_at = now
                     record.opinion = "审批超时，自动升级"
 

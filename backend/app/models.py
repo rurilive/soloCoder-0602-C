@@ -69,6 +69,11 @@ class TimeoutEscalationStrategy(str, enum.Enum):
     SKIP_NODE = "skip_node"
 
 
+class EscalationTrigger(str, enum.Enum):
+    TIMEOUT = "timeout"
+    REMINDER = "reminder"
+
+
 class ApprovalNodeActionType(str, enum.Enum):
     ADD_SIGNER = "add_signer"
     TRANSFER = "transfer"
@@ -234,6 +239,8 @@ class ApprovalNodeRecord(Base):
     acted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     timeout_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     is_escalated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    escalation_strategy: Mapped[TimeoutEscalationStrategy | None] = mapped_column(Enum(TimeoutEscalationStrategy), nullable=True)
+    escalation_trigger: Mapped[EscalationTrigger | None] = mapped_column(Enum(EscalationTrigger), nullable=True)
     actual_approver: Mapped[str | None] = mapped_column(String(128), nullable=True)
     proxy_source: Mapped[str | None] = mapped_column(String(128), nullable=True)
     record_type: Mapped[ApprovalRecordType] = mapped_column(Enum(ApprovalRecordType), default=ApprovalRecordType.NORMAL, nullable=False)
