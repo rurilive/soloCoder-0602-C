@@ -30,17 +30,11 @@ from app.parallel_engine import (
     check_branch_complete,
     check_parallel_group_ready_to_merge,
     check_any_branch_rejected,
-    generate_branch_id,
-    generate_parallel_group_id,
 )
 from app.sub_process_engine import (
     validate_sub_process_chain,
-    get_sub_process_path_items,
     build_nested_sub_process_records,
     MAX_NESTING_LEVEL,
-)
-from app.schemas import (
-    ApprovalTimelineEvent,
 )
 
 logger = logging.getLogger(__name__)
@@ -48,7 +42,7 @@ from app.schemas import (
     AssetCreate, AssetUpdate, AssetAllocate, AssetReturn, AssetScrap,
     ImportErrorItem, ApprovalCreate, ApprovalAction,
     ApprovalChainCreate, ApprovalChainUpdate, ChainNodesReorder,
-    ApprovalProxyCreate,
+    ApprovalProxyCreate, ApprovalTimelineEvent,
 )
 
 
@@ -657,7 +651,7 @@ def create_approval(db: Session, asset_id: int, data: ApprovalCreate, applicant:
                             "type": "sub_process_start",
                             "level": current_level,
                             "node": node,
-                            "nesting_level": current_nesting_level,
+                            "nesting_level": current_nesting_level + 1,
                         })
 
                         sub_path, sub_count = _resolve_path_with_sub_process(
@@ -678,7 +672,7 @@ def create_approval(db: Session, asset_id: int, data: ApprovalCreate, applicant:
                             "type": "sub_process_end",
                             "level": current_level,
                             "node": node,
-                            "nesting_level": current_nesting_level,
+                            "nesting_level": current_nesting_level + 1,
                         })
                 elif node.node_type in (ChainNodeType.PARALLEL_START, ChainNodeType.PARALLEL_END):
                     pass
@@ -728,7 +722,7 @@ def create_approval(db: Session, asset_id: int, data: ApprovalCreate, applicant:
                                     "type": "sub_process_start",
                                     "level": item.get("level"),
                                     "node": node,
-                                    "nesting_level": nesting_level,
+                                    "nesting_level": nesting_level + 1,
                                     **{k: item.get(k) for k in ("branch_id", "branch_index", "group_id") if item.get(k) is not None},
                                 })
                                 sub_path, sub_count = _resolve_path_with_sub_process(
@@ -736,7 +730,6 @@ def create_approval(db: Session, asset_id: int, data: ApprovalCreate, applicant:
                                 )
                                 for sub_item in sub_path:
                                     sub_item["parent_node_id"] = node.id
-                                    sub_item["nesting_level"] = nesting_level + 1
                                     for k in ("branch_id", "branch_index", "group_id"):
                                         if item.get(k) is not None and k not in sub_item:
                                             sub_item[k] = item[k]
@@ -746,7 +739,7 @@ def create_approval(db: Session, asset_id: int, data: ApprovalCreate, applicant:
                                     "type": "sub_process_end",
                                     "level": item.get("level"),
                                     "node": node,
-                                    "nesting_level": nesting_level,
+                                    "nesting_level": nesting_level + 1,
                                     **{k: item.get(k) for k in ("branch_id", "branch_index", "group_id") if item.get(k) is not None},
                                 })
                             else:
@@ -754,7 +747,7 @@ def create_approval(db: Session, asset_id: int, data: ApprovalCreate, applicant:
                                 expanded.append(item)
                         elif item["type"] == "branch":
                             branch_nodes = item.get("nodes", [])
-                            expanded_branch_nodes = _expand_sub_process_in_path_items(branch_nodes, nesting_level + 1, visited_chain_set)
+                            expanded_branch_nodes = _expand_sub_process_in_path_items(branch_nodes, nesting_level, visited_chain_set)
                             expanded.append({
                                 "type": "branch",
                                 "branch_id": item.get("branch_id"),
@@ -1722,6 +1715,24 @@ def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approv
             parent_record.status = ApprovalStatus.REJECTED
             parent_record.opinion = "子流程被驳回"
             parent_record.acted_at = now
+
+            for sibling in sibling_records:
+                if sibling.id != parent_record.id and sibling.status == ApprovalStatus.PENDING:
+                    sibling.status = ApprovalStatus.WITHDRAWN
+                    sibling.opinion = "因子流程被驳回，节点取消"
+                    sibling.acted_at = now
+
+            if parent_record.parallel_group_id and parent_record.branch_id:
+                all_same_approval_records = db.query(ApprovalNodeRecord).filter(
+                    ApprovalNodeRecord.approval_id == parent_record.approval_id,
+                    ApprovalNodeRecord.parallel_group_id == parent_record.parallel_group_id,
+                    ApprovalNodeRecord.branch_id != parent_record.branch_id,
+                    ApprovalNodeRecord.status == ApprovalStatus.PENDING,
+                ).all()
+                for r in all_same_approval_records:
+                    r.status = ApprovalStatus.WITHDRAWN
+                    r.opinion = "并行分支因子流程驳回而取消"
+                    r.acted_at = now
 
             grand_parent = _check_and_handle_sub_process_complete(parent_record)
             return grand_parent if grand_parent else parent_record

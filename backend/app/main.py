@@ -501,6 +501,49 @@ def _migrate_parallel_gateway_columns():
         db.close()
 
 
+def _migrate_sub_process_columns():
+    db: Session = SessionLocal()
+    try:
+        from sqlalchemy import inspect, text
+        insp = inspect(engine)
+
+        if insp.has_table("approval_chain_nodes"):
+            chain_node_cols = {c["name"] for c in insp.get_columns("approval_chain_nodes")}
+            if "sub_process_chain_id" not in chain_node_cols:
+                db.execute(text("ALTER TABLE approval_chain_nodes ADD COLUMN sub_process_chain_id INTEGER REFERENCES approval_chains(id)"))
+                db.commit()
+                print("[数据迁移] approval_chain_nodes 新增 sub_process_chain_id 列")
+
+        if insp.has_table("approval_node_records"):
+            node_record_cols = {c["name"] for c in insp.get_columns("approval_node_records")}
+            new_cols = [
+                ("sub_process_id", "INTEGER REFERENCES approvals(id)"),
+                ("sub_process_nesting_level", "INTEGER NOT NULL DEFAULT 0"),
+                ("parent_record_id", "INTEGER REFERENCES approval_node_records(id)"),
+                ("node_type", "VARCHAR(50)"),
+                ("sub_process_chain_id", "INTEGER REFERENCES approval_chains(id)"),
+            ]
+            for col_name, col_type in new_cols:
+                if col_name not in node_record_cols:
+                    db.execute(text(f"ALTER TABLE approval_node_records ADD COLUMN {col_name} {col_type}"))
+                    db.commit()
+                    print(f"[数据迁移] approval_node_records 新增 {col_name} 列")
+
+        if insp.has_table("approval_node_records"):
+            db.execute(text("""
+                UPDATE approval_node_records 
+                SET node_type = 'APPROVAL' 
+                WHERE node_type IS NULL OR node_type = 'approval'
+            """))
+            db.commit()
+
+    except Exception as e:
+        db.rollback()
+        print(f"[数据迁移] 子流程字段迁移失败: {e}")
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
@@ -514,6 +557,7 @@ async def lifespan(app: FastAPI):
     _migrate_processing_lock_columns()
     _migrate_escalation_strategy_columns()
     _migrate_parallel_gateway_columns()
+    _migrate_sub_process_columns()
     task = asyncio.create_task(_background_timeout_checker())
     yield
     task.cancel()
