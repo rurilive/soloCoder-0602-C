@@ -3303,9 +3303,15 @@ def build_approval_timeline(
                 if record.is_escalated:
                     event_type = "escalate"
                     trigger_prefix = "催办" if record.escalation_trigger == EscalationTrigger.REMINDER else "超时"
-                    if record.escalation_strategy == TimeoutEscalationStrategy.SKIP_NODE:
+                    strategy = record.escalation_strategy
+                    if strategy is None:
+                        if record.status == ApprovalStatus.REJECTED:
+                            strategy = TimeoutEscalationStrategy.AUTO_REJECT
+                        else:
+                            strategy = TimeoutEscalationStrategy.ESCALATE_TO_LEVEL
+                    if strategy == TimeoutEscalationStrategy.SKIP_NODE:
                         event_type_cn = f"{trigger_prefix}跳过"
-                    elif record.escalation_strategy == TimeoutEscalationStrategy.AUTO_REJECT:
+                    elif strategy == TimeoutEscalationStrategy.AUTO_REJECT:
                         event_type_cn = f"{trigger_prefix}自动驳回"
                     else:
                         event_type_cn = f"{trigger_prefix}升级"
