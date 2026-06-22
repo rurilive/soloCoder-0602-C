@@ -2253,8 +2253,6 @@ def _send_escalation_notifications(
     escalation_reason: str,
     branch_id: str | None = None,
 ) -> None:
-    from app.auth import get_user_display_name
-
     target_records = (
         db.query(ApprovalNodeRecord)
         .filter(
@@ -3294,9 +3292,12 @@ def build_approval_timeline(
                 if record.proxy_source:
                     event_type_cn = f"代理审批{status_cn}"
 
-                if record.is_escalated and record.status == ApprovalStatus.ESCALATED:
+                if record.is_escalated:
                     event_type = "escalate"
-                    event_type_cn = "超时升级/跳过"
+                    if record.status == ApprovalStatus.ESCALATED:
+                        event_type_cn = "超时升级/跳过"
+                    elif record.status == ApprovalStatus.REJECTED:
+                        event_type_cn = "超时自动驳回"
 
                 events.append(
                     ApprovalTimelineEvent(
