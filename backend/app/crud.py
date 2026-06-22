@@ -1445,6 +1445,86 @@ def _finish_approval_as_rejected(
     return approval
 
 
+def _withdraw_sub_process_internal_records(db: Session, parent_rec: ApprovalNodeRecord, opinion: str, now):
+    from app.models import ChainNodeType
+    internal_records = db.query(ApprovalNodeRecord).filter(
+        ApprovalNodeRecord.parent_record_id == parent_rec.id
+    ).all()
+    for internal in internal_records:
+        if internal.status == ApprovalStatus.PENDING:
+            internal.status = ApprovalStatus.WITHDRAWN
+            internal.opinion = opinion
+            internal.acted_at = now
+        if internal.node_type == ChainNodeType.SUB_PROCESS:
+            _withdraw_sub_process_internal_records(db, internal, opinion, now)
+
+
+def _check_and_handle_sub_process_complete(db: Session, record: ApprovalNodeRecord, now) -> ApprovalNodeRecord | None:
+    from app.models import ChainNodeType
+    if not record.parent_record_id:
+        return None
+
+    parent_record = db.query(ApprovalNodeRecord).filter(
+        ApprovalNodeRecord.id == record.parent_record_id
+    ).first()
+    if not parent_record or parent_record.node_type != ChainNodeType.SUB_PROCESS:
+        return None
+
+    sibling_records = db.query(ApprovalNodeRecord).filter(
+        ApprovalNodeRecord.parent_record_id == record.parent_record_id
+    ).all()
+
+    all_approved = all(
+        r.status == ApprovalStatus.APPROVED
+        for r in sibling_records
+        if r.id != parent_record.id
+    )
+    any_rejected = any(
+        r.status == ApprovalStatus.REJECTED
+        for r in sibling_records
+        if r.id != parent_record.id
+    )
+
+    if any_rejected:
+        parent_record.status = ApprovalStatus.REJECTED
+        parent_record.opinion = "子流程被驳回"
+        parent_record.acted_at = now
+
+        for sibling in sibling_records:
+            if sibling.id != parent_record.id and sibling.status == ApprovalStatus.PENDING:
+                sibling.status = ApprovalStatus.WITHDRAWN
+                sibling.opinion = "因子流程被驳回，节点取消"
+                sibling.acted_at = now
+                if sibling.node_type == ChainNodeType.SUB_PROCESS:
+                    _withdraw_sub_process_internal_records(db, sibling, "因子流程被驳回，节点取消", now)
+
+        if parent_record.parallel_group_id and parent_record.branch_id:
+            all_same_approval_records = db.query(ApprovalNodeRecord).filter(
+                ApprovalNodeRecord.approval_id == parent_record.approval_id,
+                ApprovalNodeRecord.parallel_group_id == parent_record.parallel_group_id,
+                ApprovalNodeRecord.branch_id != parent_record.branch_id,
+                ApprovalNodeRecord.status == ApprovalStatus.PENDING,
+            ).all()
+            for r in all_same_approval_records:
+                r.status = ApprovalStatus.WITHDRAWN
+                r.opinion = "并行分支因子流程驳回而取消"
+                r.acted_at = now
+                if r.node_type == ChainNodeType.SUB_PROCESS:
+                    _withdraw_sub_process_internal_records(db, r, "并行分支因子流程驳回而取消", now)
+
+        grand_parent = _check_and_handle_sub_process_complete(db, parent_record, now)
+        return grand_parent if grand_parent else parent_record
+    elif all_approved:
+        parent_record.status = ApprovalStatus.APPROVED
+        parent_record.opinion = "子流程审批通过"
+        parent_record.acted_at = now
+
+        grand_parent = _check_and_handle_sub_process_complete(db, parent_record, now)
+        return grand_parent if grand_parent else parent_record
+
+    return None
+
+
 def _reject_parallel_and_cancel_other_branches(
     db: Session,
     approval: Approval,
@@ -1461,6 +1541,7 @@ def _reject_parallel_and_cancel_other_branches(
     :param reason_branch_id: 触发驳回的分支ID（不修改这个分支的记录，只改其他分支）
     """
     from datetime import datetime as _dt
+    from app.models import ChainNodeType
 
     now = _dt.now()
 
@@ -1479,6 +1560,8 @@ def _reject_parallel_and_cancel_other_branches(
         r.status = ApprovalStatus.WITHDRAWN
         r.opinion = f"其他分支全部驳回，审批单被驳回，本分支节点已取消"
         r.acted_at = now
+        if r.node_type == ChainNodeType.SUB_PROCESS:
+            _withdraw_sub_process_internal_records(db, r, "其他分支全部驳回，本分支子流程取消", now)
 
     return _finish_approval_as_rejected(
         db, approval, asset, approver_name, approver_id, opinion
@@ -1686,67 +1769,7 @@ def approve_approval(db: Session, approval_id: int, data: ApprovalAction, approv
     approval.updated_at = datetime.now()
     db.flush()
 
-    def _check_and_handle_sub_process_complete(record: ApprovalNodeRecord) -> ApprovalNodeRecord | None:
-        if not record.parent_record_id:
-            return None
-
-        parent_record = db.query(ApprovalNodeRecord).filter(
-            ApprovalNodeRecord.id == record.parent_record_id
-        ).first()
-        if not parent_record or parent_record.node_type != ChainNodeType.SUB_PROCESS:
-            return None
-
-        sibling_records = db.query(ApprovalNodeRecord).filter(
-            ApprovalNodeRecord.parent_record_id == record.parent_record_id
-        ).all()
-
-        all_approved = all(
-            r.status == ApprovalStatus.APPROVED
-            for r in sibling_records
-            if r.id != parent_record.id
-        )
-        any_rejected = any(
-            r.status == ApprovalStatus.REJECTED
-            for r in sibling_records
-            if r.id != parent_record.id
-        )
-
-        if any_rejected:
-            parent_record.status = ApprovalStatus.REJECTED
-            parent_record.opinion = "子流程被驳回"
-            parent_record.acted_at = now
-
-            for sibling in sibling_records:
-                if sibling.id != parent_record.id and sibling.status == ApprovalStatus.PENDING:
-                    sibling.status = ApprovalStatus.WITHDRAWN
-                    sibling.opinion = "因子流程被驳回，节点取消"
-                    sibling.acted_at = now
-
-            if parent_record.parallel_group_id and parent_record.branch_id:
-                all_same_approval_records = db.query(ApprovalNodeRecord).filter(
-                    ApprovalNodeRecord.approval_id == parent_record.approval_id,
-                    ApprovalNodeRecord.parallel_group_id == parent_record.parallel_group_id,
-                    ApprovalNodeRecord.branch_id != parent_record.branch_id,
-                    ApprovalNodeRecord.status == ApprovalStatus.PENDING,
-                ).all()
-                for r in all_same_approval_records:
-                    r.status = ApprovalStatus.WITHDRAWN
-                    r.opinion = "并行分支因子流程驳回而取消"
-                    r.acted_at = now
-
-            grand_parent = _check_and_handle_sub_process_complete(parent_record)
-            return grand_parent if grand_parent else parent_record
-        elif all_approved:
-            parent_record.status = ApprovalStatus.APPROVED
-            parent_record.opinion = "子流程审批通过"
-            parent_record.acted_at = now
-
-            grand_parent = _check_and_handle_sub_process_complete(parent_record)
-            return grand_parent if grand_parent else parent_record
-
-        return None
-
-    sub_process_root_parent = _check_and_handle_sub_process_complete(pending_record)
+    sub_process_root_parent = _check_and_handle_sub_process_complete(db, pending_record, now)
     if sub_process_root_parent and sub_process_root_parent.status == ApprovalStatus.REJECTED:
         return _finish_approval_as_rejected(
             db, approval, asset, approver_name, approver_id,
@@ -2032,36 +2055,13 @@ def reject_approval(db: Session, approval_id: int, data: ApprovalAction, approve
         if r is not pending_record:
             db.refresh(r)
         if r.status == ApprovalStatus.PENDING:
-            r.status = ApprovalStatus.REJECTED
-            r.opinion = f"节点被驳回：{data.opinion or '无意见'}"
+            r.status = ApprovalStatus.WITHDRAWN
+            r.opinion = f"同级节点被驳回，本节点已取消：{data.opinion or '无意见'}"
             r.acted_at = now
+            if r.node_type == ChainNodeType.SUB_PROCESS:
+                _withdraw_sub_process_internal_records(db, r, "同级节点被驳回，子流程取消", now)
 
-    def _handle_sub_process_reject(record: ApprovalNodeRecord) -> ApprovalNodeRecord:
-        if not record.parent_record_id:
-            return record
-
-        parent_record = db.query(ApprovalNodeRecord).filter(
-            ApprovalNodeRecord.id == record.parent_record_id
-        ).first()
-        if not parent_record or parent_record.node_type != ChainNodeType.SUB_PROCESS:
-            return record
-
-        parent_record.status = ApprovalStatus.REJECTED
-        parent_record.opinion = "子流程被驳回"
-        parent_record.acted_at = now
-
-        sibling_records = db.query(ApprovalNodeRecord).filter(
-            ApprovalNodeRecord.parent_record_id == record.parent_record_id
-        ).all()
-        for sibling in sibling_records:
-            if sibling.id != parent_record.id and sibling.status == ApprovalStatus.PENDING:
-                sibling.status = ApprovalStatus.REJECTED
-                sibling.opinion = "因子流程被驳回，后续节点取消"
-                sibling.acted_at = now
-
-        return _handle_sub_process_reject(parent_record)
-
-    sub_process_root_parent = _handle_sub_process_reject(pending_record)
+    sub_process_root_parent = _check_and_handle_sub_process_complete(db, pending_record, now)
     current_record_for_next = sub_process_root_parent if sub_process_root_parent else pending_record
 
     is_parallel_branch = current_record_for_next.parallel_group_id is not None and current_record_for_next.branch_id is not None
@@ -2085,6 +2085,8 @@ def reject_approval(db: Session, approval_id: int, data: ApprovalAction, approve
             r.status = ApprovalStatus.WITHDRAWN
             r.opinion = f"本分支前面节点被驳回，后续节点取消"
             r.acted_at = now
+            if r.node_type == ChainNodeType.SUB_PROCESS:
+                _withdraw_sub_process_internal_records(db, r, "本分支前面节点被驳回，子流程取消", now)
         db.flush()
 
         all_records = (
@@ -2129,7 +2131,12 @@ def reject_approval(db: Session, approval_id: int, data: ApprovalAction, approve
         .all()
     )
     for r in remaining_records:
-        r.status = ApprovalStatus.REJECTED
+        if r.status == ApprovalStatus.PENDING:
+            r.status = ApprovalStatus.WITHDRAWN
+            r.opinion = "前面节点被驳回，后续节点取消"
+            r.acted_at = now
+            if r.node_type == ChainNodeType.SUB_PROCESS:
+                _withdraw_sub_process_internal_records(db, r, "前面节点被驳回，子流程取消", now)
 
     return _finish_approval_as_rejected(db, approval, asset, approver_name, approver_id, data.opinion)
 

@@ -2,7 +2,7 @@ import requests
 import json
 import time
 
-BASE_URL = "http://localhost:3331/api"
+BASE_URL = "http://localhost:8002/api"
 
 login_data = {"username": "admin", "password": "admin123"}
 resp = requests.post(f"{BASE_URL}/auth/login", json=login_data)
@@ -60,7 +60,8 @@ Level 2: 并行网关 Start
          │           ├─ Level 1: 部门经理
          │           └─ Level 2: 子流程B
          │                      └─ Level 1: 总监
-         └─ Branch 2: 财务
+         └─ Branch 2: 子流程C（级联取消测试）
+                     └─ Level 1: 财务经理
 Level 3: 并行网关 End
 Level 4: 总经理
 """)
@@ -84,7 +85,26 @@ resp = requests.post(f"{BASE_URL}/approvals/chains", json=sub_chain_b_data, head
 sub_chain_b_id = resp.json()["id"]
 print(f"  ✓ 子流程B创建成功，ID: {sub_chain_b_id}")
 
-print("\n2. 创建子流程A（引用子流程B，形成2层嵌套）...")
+print("\n2. 创建子流程C（并行分支2的子流程）...")
+sub_chain_c_data = {
+    "name": "子流程C-财务复核",
+    "approval_type": "allocate",
+    "is_default": False,
+    "min_price": 999999999,
+    "max_price": 999999999,
+    "nodes": [
+        {
+            "node_type": "approval",
+            "approvers": [{"approver_role": "finance_mgr", "approver_name": "财务经理"}],
+            "sign_condition": "and",
+        }
+    ]
+}
+resp = requests.post(f"{BASE_URL}/approvals/chains", json=sub_chain_c_data, headers=headers)
+sub_chain_c_id = resp.json()["id"]
+print(f"  ✓ 子流程C创建成功，ID: {sub_chain_c_id}")
+
+print("\n3. 创建子流程A（引用子流程B，形成2层嵌套）...")
 sub_chain_a_data = {
     "name": "子流程A-部门+总监",
     "approval_type": "allocate",
@@ -144,12 +164,12 @@ main_chain_data = {
             "approvers": [],
         },
         {
-            "node_type": "approval",
+            "node_type": "sub_process",
             "parallel_group_id": pg_id,
             "branch_id": b2_id,
             "branch_index": 1,
-            "approvers": [{"approver_role": "finance", "approver_name": "财务"}],
-            "sign_condition": "and",
+            "sub_process_chain_id": sub_chain_c_id,
+            "approvers": [],
         },
         {
             "node_type": "parallel_end",
@@ -364,13 +384,23 @@ if resp.status_code == 200:
     else:
         print(f"    ⚠ 子流程A状态: {sub_proc_a[0].get('status') if sub_proc_a else 'N/A'}")
     
-    finance_node = [r for r in records if r.get("approver_name") == "财务"]
-    if finance_node:
-        status = finance_node[0].get("status", "")
+    sub_proc_c = [r for r in records if r.get("node_type") == "sub_process" and "子流程C" in r.get("approver_name", "")]
+    if sub_proc_c:
+        status = sub_proc_c[0].get("status", "")
         if status == "withdrawn":
-            print(f"    ✓ 财务节点状态: withdrawn（正确取消并行分支兄弟）")
+            print(f"    ✓ 子流程C状态: withdrawn（正确取消并行分支兄弟子流程）")
         else:
-            print(f"    ⚠ 财务节点状态: {status}（期望 withdrawn）")
+            print(f"    ⚠ 子流程C状态: {status}（期望 withdrawn）")
+        
+        sub_c_internal = sub_proc_c[0].get("sub_process_records", [])
+        if sub_c_internal:
+            fin_mgr = [r for r in sub_c_internal if r.get("approver_name") == "财务经理"]
+            if fin_mgr:
+                fin_status = fin_mgr[0].get("status", "")
+                if fin_status == "withdrawn":
+                    print(f"    ✓ 子流程C内部-财务经理状态: withdrawn（级联取消正确）")
+                else:
+                    print(f"    ⚠ 子流程C内部-财务经理状态: {fin_status}（期望 withdrawn）")
     
     gm_node = [r for r in records if r.get("approver_name") == "总经理"]
     if gm_node:
