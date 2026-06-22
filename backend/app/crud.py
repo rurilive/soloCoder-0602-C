@@ -3294,10 +3294,12 @@ def build_approval_timeline(
 
                 if record.is_escalated:
                     event_type = "escalate"
-                    if record.status == ApprovalStatus.ESCALATED:
-                        event_type_cn = "超时升级/跳过"
-                    elif record.status == ApprovalStatus.REJECTED:
+                    if record.status == ApprovalStatus.REJECTED:
                         event_type_cn = "超时自动驳回"
+                    elif "跳过" in (record.opinion or ""):
+                        event_type_cn = "超时跳过"
+                    else:
+                        event_type_cn = "超时升级"
 
                 events.append(
                     ApprovalTimelineEvent(
