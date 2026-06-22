@@ -501,29 +501,39 @@ def _migrate_parallel_gateway_columns():
         db.close()
 
 
+def _ensure_schema_migrations_table(db: Session):
+    from sqlalchemy import inspect, text
+    insp = inspect(engine)
+    if not insp.has_table("schema_migrations"):
+        db.execute(text("""
+            CREATE TABLE schema_migrations (
+                version VARCHAR(255) PRIMARY KEY,
+                applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """))
+        db.commit()
+        print("[数据迁移] 创建 schema_migrations 表")
+
+
+def _is_migration_applied(db: Session, version: str) -> bool:
+    from sqlalchemy import text
+    result = db.execute(text("SELECT 1 FROM schema_migrations WHERE version = :version"), {"version": version}).fetchone()
+    return result is not None
+
+
+def _mark_migration_applied(db: Session, version: str):
+    from sqlalchemy import text
+    db.execute(text("INSERT INTO schema_migrations (version) VALUES (:version)"), {"version": version})
+    db.commit()
+
+
 def _migrate_sub_process_columns():
     db: Session = SessionLocal()
     try:
         from sqlalchemy import inspect, text
         insp = inspect(engine)
 
-        if not insp.has_table("schema_migrations"):
-            db.execute(text("""
-                CREATE TABLE schema_migrations (
-                    version VARCHAR(255) PRIMARY KEY,
-                    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """))
-            db.commit()
-            print("[数据迁移] 创建 schema_migrations 表")
-
-        def migration_applied(version: str) -> bool:
-            result = db.execute(text("SELECT 1 FROM schema_migrations WHERE version = :version"), {"version": version}).fetchone()
-            return result is not None
-
-        def mark_migration_applied(version: str):
-            db.execute(text("INSERT INTO schema_migrations (version) VALUES (:version)"), {"version": version})
-            db.commit()
+        _ensure_schema_migrations_table(db)
 
         if insp.has_table("approval_chain_nodes"):
             chain_node_cols = {c["name"] for c in insp.get_columns("approval_chain_nodes")}
@@ -548,14 +558,14 @@ def _migrate_sub_process_columns():
                     print(f"[数据迁移] approval_node_records 新增 {col_name} 列")
 
         migration_version = "sub_process_node_type_backfill"
-        if insp.has_table("approval_node_records") and not migration_applied(migration_version):
+        if insp.has_table("approval_node_records") and not _is_migration_applied(db, migration_version):
             db.execute(text("""
                 UPDATE approval_node_records 
                 SET node_type = 'APPROVAL' 
                 WHERE node_type IS NULL OR node_type = 'approval'
             """))
             db.commit()
-            mark_migration_applied(migration_version)
+            _mark_migration_applied(db, migration_version)
             print("[数据迁移] 已回填 approval_node_records.node_type")
 
     except Exception as e:

@@ -1446,7 +1446,6 @@ def _finish_approval_as_rejected(
 
 
 def _withdraw_sub_process_internal_records(db: Session, parent_rec: ApprovalNodeRecord, opinion: str, now):
-    from app.models import ChainNodeType
     internal_records = db.query(ApprovalNodeRecord).filter(
         ApprovalNodeRecord.parent_record_id == parent_rec.id
     ).all()
@@ -1460,7 +1459,6 @@ def _withdraw_sub_process_internal_records(db: Session, parent_rec: ApprovalNode
 
 
 def _check_and_handle_sub_process_complete(db: Session, record: ApprovalNodeRecord, now) -> ApprovalNodeRecord | None:
-    from app.models import ChainNodeType
     if not record.parent_record_id:
         return None
 
@@ -1541,7 +1539,6 @@ def _reject_parallel_and_cancel_other_branches(
     :param reason_branch_id: 触发驳回的分支ID（不修改这个分支的记录，只改其他分支）
     """
     from datetime import datetime as _dt
-    from app.models import ChainNodeType
 
     now = _dt.now()
 
