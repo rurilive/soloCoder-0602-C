@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { getApproval, approveApproval, rejectApproval, addSigner, transferApproval, getAvailableApprovalUsers } from '../api/assets'
 
@@ -33,6 +33,42 @@ const BRANCH_COLORS = ['#60a5fa', '#34d399', '#fbbf24', '#f87171', '#a78bfa', '#
 function formatTime(t) {
   if (!t) return '-'
   return new Date(t).toLocaleString('zh-CN')
+}
+
+function formatCountdown(ms) {
+  if (ms <= 0) return '已超时'
+  const seconds = Math.floor(ms / 1000)
+  const days = Math.floor(seconds / 86400)
+  const hours = Math.floor((seconds % 86400) / 3600)
+  const minutes = Math.floor((seconds % 3600) / 60)
+  const secs = seconds % 60
+  if (days > 0) return `${days}天${hours}时${minutes}分`
+  if (hours > 0) return `${hours}时${minutes}分${secs}秒`
+  if (minutes > 0) return `${minutes}分${secs}秒`
+  return `${secs}秒`
+}
+
+function useCountdown(timeoutAt) {
+  const [now, setNow] = useState(Date.now())
+  useEffect(() => {
+    if (!timeoutAt) return
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [timeoutAt])
+  if (!timeoutAt) return { remaining: null, isTimeout: false, text: null }
+  const remaining = new Date(timeoutAt).getTime() - now
+  return {
+    remaining,
+    isTimeout: remaining <= 0,
+    text: formatCountdown(remaining),
+  }
+}
+
+function isRecordTimeout(record, approval) {
+  if (!record?.timeout_at) return false
+  if (record.status !== 'pending') return false
+  if (record.transfer_status === 'transferred') return false
+  return new Date(record.timeout_at).getTime() < Date.now()
 }
 
 function getLevelState(levelRecords, approval) {
@@ -103,20 +139,36 @@ function getApproverBadgeColor(state) {
 
 function ApproverRow({ rec, currentUser, onTransfer }) {
   const approverState = getApproverState(rec)
+  const countdown = useCountdown(rec.timeout_at)
+  const isTimeout = isRecordTimeout(rec)
   const isCurrentUserApprover =
     (rec.approver_name === currentUser?.real_name ||
      rec.approver_name === currentUser?.username) &&
     rec.status === 'pending' &&
     rec.transfer_status !== 'transferred'
+
+  const getCountdownColor = () => {
+    if (!countdown.text) return null
+    if (countdown.isTimeout) return 'var(--danger)'
+    if (countdown.remaining != null && countdown.remaining < 5 * 60 * 1000) return 'var(--warning)'
+    return 'var(--text-secondary)'
+  }
+
+  const rowBg = isTimeout ? 'rgba(239, 68, 68, 0.06)' :
+    isCurrentUserApprover ? 'rgba(13, 110, 253, 0.05)' : 'transparent'
+  const rowBorder = isTimeout ? '1px solid var(--danger)' :
+    isCurrentUserApprover ? '1px solid var(--primary)' : 'none'
+
   return (
     <div
       key={rec.id}
       className={`chain-approver-row chain-approver-${approverState}`}
       style={{
-        border: isCurrentUserApprover ? '1px solid var(--primary)' : 'none',
+        border: rowBorder,
         borderRadius: 6,
-        padding: isCurrentUserApprover ? 6 : 0,
-        background: isCurrentUserApprover ? 'rgba(13, 110, 253, 0.05)' : 'transparent',
+        padding: isCurrentUserApprover || isTimeout ? 6 : 0,
+        background: rowBg,
+        transition: 'all 0.2s ease',
       }}
     >
       <span
@@ -136,6 +188,18 @@ function ApproverRow({ rec, currentUser, onTransfer }) {
           <span className={`status-badge status-${rec.transfer_status === 'transferred' ? 'transferred' : rec.status}`} style={{ fontSize: 11 }}>
             {rec.transfer_status === 'transferred' ? '已转审' : STATUS_MAP[rec.status]}
           </span>
+          {rec.is_escalated && (
+            <span
+              className="status-badge"
+              style={{
+                fontSize: 11,
+                background: 'rgba(168, 85, 247, 0.12)',
+                color: 'var(--warning)',
+              }}
+            >
+              ⬆️ 超时升级
+            </span>
+          )}
           {rec.is_added_signer && (
             <span
               className="status-badge"
@@ -156,6 +220,20 @@ function ApproverRow({ rec, currentUser, onTransfer }) {
           {rec.added_signer_by && (
             <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
               (由 {rec.added_signer_by} 追加)
+            </span>
+          )}
+          {countdown.text && rec.status === 'pending' && rec.transfer_status !== 'transferred' && (
+            <span
+              className="status-badge"
+              style={{
+                fontSize: 11,
+                background: countdown.isTimeout ? 'rgba(239, 68, 68, 0.1)' : 'rgba(245, 158, 11, 0.1)',
+                color: getCountdownColor(),
+                fontWeight: 600,
+                marginLeft: 'auto',
+              }}
+            >
+              {countdown.isTimeout ? '⚠️ ' : '⏰ '}{countdown.text}
             </span>
           )}
           {isCurrentUserApprover && (
@@ -222,6 +300,11 @@ function ApproverRow({ rec, currentUser, onTransfer }) {
             等待审批中...
           </div>
         )}
+        {rec.timeout_at && !rec.acted_at && (
+          <div className="chain-node-meta" style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 2 }}>
+            超时时间: {formatTime(rec.timeout_at)}
+          </div>
+        )}
       </div>
     </div>
   )
@@ -243,14 +326,28 @@ function LevelNodeBlock({ level, records, approval, currentUser, onAddSigner, on
   const branchIdx = records[0]?.branch_index ?? 0
   const branchColor = inBranch ? BRANCH_COLORS[branchIdx % BRANCH_COLORS.length] : null
 
+  const hasTimeout = records.some((r) => isRecordTimeout(r))
+  const hasEscalated = records.some((r) => r.is_escalated)
+
+  const nodeBorderStyle = hasTimeout
+    ? {
+        border: '2px solid var(--danger)',
+        boxShadow: '0 0 0 3px rgba(239, 68, 68, 0.08)',
+      }
+    : undefined
+
   return (
     <div
       className={`approval-chain-node chain-node-${state}`}
-      style={inBranch && branchColor ? {
-        borderLeft: `4px solid ${branchColor}`,
-        borderTopLeftRadius: 0,
-        borderBottomLeftRadius: 0,
-      } : undefined}
+      style={{
+        ...(inBranch && branchColor ? {
+          borderLeft: `4px solid ${branchColor}`,
+          borderTopLeftRadius: 0,
+          borderBottomLeftRadius: 0,
+        } : undefined),
+        ...nodeBorderStyle,
+        transition: 'all 0.2s ease',
+      }}
     >
       {showConnector && <div className="chain-connector" />}
       <NodeIcon state={state} />
@@ -284,6 +381,32 @@ function LevelNodeBlock({ level, records, approval, currentUser, onAddSigner, on
               }}
             >
               部分通过
+            </span>
+          )}
+          {hasTimeout && (
+            <span
+              className="status-badge"
+              style={{
+                fontSize: 11,
+                background: 'rgba(239, 68, 68, 0.12)',
+                color: 'var(--danger)',
+                fontWeight: 600,
+              }}
+            >
+              ⚠️ 已超时
+            </span>
+          )}
+          {hasEscalated && !hasTimeout && (
+            <span
+              className="status-badge"
+              style={{
+                fontSize: 11,
+                background: 'rgba(168, 85, 247, 0.12)',
+                color: 'var(--warning)',
+                fontWeight: 600,
+              }}
+            >
+              ⬆️ 已升级
             </span>
           )}
           {canAddSigner && (
@@ -1159,6 +1282,14 @@ export default function ApprovalDetail() {
     fetchApproval()
     fetchCurrentUser()
   }, [id])
+
+  useEffect(() => {
+    if (approval?.status !== 'pending') return
+    const timer = setInterval(() => {
+      fetchApproval()
+    }, 30000)
+    return () => clearInterval(timer)
+  }, [approval?.status, id])
 
   if (loading) return <div className="empty-state"><p>加载中...</p></div>
   if (!approval) return <div className="empty-state"><p>审批单不存在</p></div>

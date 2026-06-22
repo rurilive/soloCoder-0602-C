@@ -2246,6 +2246,59 @@ def _create_notification(
     return notification
 
 
+def _send_escalation_notifications(
+    db: Session,
+    approval: Approval,
+    target_level: int,
+    escalation_reason: str,
+    branch_id: str | None = None,
+) -> None:
+    from app.auth import get_user_display_name
+
+    target_records = (
+        db.query(ApprovalNodeRecord)
+        .filter(
+            ApprovalNodeRecord.approval_id == approval.id,
+            ApprovalNodeRecord.level == target_level,
+        )
+    )
+    if branch_id:
+        target_records = target_records.filter(ApprovalNodeRecord.branch_id == branch_id)
+    target_records = target_records.all()
+
+    if not target_records:
+        return
+
+    action_type_cn = "领用" if approval.approval_type == ApprovalType.ALLOCATE else "报废"
+    notification_title = f"审批升级通知：{action_type_cn}申请"
+
+    notified_roles = set()
+    for record in target_records:
+        if record.approver_role in notified_roles:
+            continue
+        notified_roles.add(record.approver_role)
+        approver_users = _find_users_by_role(db, record.approver_role)
+
+        notification_content = (
+            f"{action_type_cn}审批单（#{approval.id}）已升级，请您审批处理。\n"
+            f"申请人：{approval.applicant}\n"
+            f"升级原因：{escalation_reason}\n"
+            f"当前审批级别：第{target_level}级\n"
+            f"请及时处理该审批单。"
+        )
+
+        for user in approver_users:
+            _create_notification(
+                db,
+                user_id=user.id,
+                notification_type=NotificationType.APPROVAL_ESCALATED,
+                title=notification_title,
+                content=notification_content,
+                related_id=approval.id,
+                related_type="approval",
+            )
+
+
 def remind_approval(db: Session, approval_id: int, message: str | None = None, applicant: User | None = None) -> Approval:
     from app.auth import get_user_display_name
 
@@ -2465,6 +2518,14 @@ def _trigger_escalation_by_reminder(
             detail=f"审批单#{approval.id}第{current_level}级{mode_desc}催办{node_reminder_count}次未响应，{strategy_desc}到第{next_level}级（{strategy_desc}{len(pending_records)}人）",
         )
         db.add(op_log)
+
+        if escalation_strategy in (TimeoutEscalationStrategy.ESCALATE_TO_LEVEL, TimeoutEscalationStrategy.SKIP_NODE):
+            _send_escalation_notifications(
+                db,
+                approval,
+                next_level,
+                f"催办{node_reminder_count}次未响应，自动{strategy_desc}到第{next_level}级",
+            )
     else:
         if cycle_reason:
             final_reason = cycle_reason
@@ -3233,8 +3294,9 @@ def build_approval_timeline(
                 if record.proxy_source:
                     event_type_cn = f"代理审批{status_cn}"
 
-                if record.is_escalated:
-                    event_type_cn = f"超时升级{status_cn}"
+                if record.is_escalated and record.status == ApprovalStatus.ESCALATED:
+                    event_type = "escalate"
+                    event_type_cn = "超时升级/跳过"
 
                 events.append(
                     ApprovalTimelineEvent(
@@ -4072,6 +4134,15 @@ def _process_timeouts_internal(db: Session) -> list[dict]:
                     detail=f"审批单#{approval.id}第{level}级{mode_desc}{branch_info}超时，{strategy_desc}到第{next_level}级（{strategy_desc}{len(pending_records)}人）",
                 )
                 db.add(op_log)
+
+                if escalation_strategy in (TimeoutEscalationStrategy.ESCALATE_TO_LEVEL, TimeoutEscalationStrategy.SKIP_NODE):
+                    _send_escalation_notifications(
+                        db,
+                        approval,
+                        next_level,
+                        f"审批超时，自动{strategy_desc}到第{next_level}级",
+                        branch_id if is_parallel_branch else None,
+                    )
 
                 result_entry = {
                     "approval_id": approval.id,

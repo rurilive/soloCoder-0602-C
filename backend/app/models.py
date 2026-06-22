@@ -91,6 +91,7 @@ class NotificationType(str, enum.Enum):
     APPROVAL_APPROVED = "approval_approved"
     APPROVAL_REJECTED = "approval_rejected"
     APPROVAL_WITHDRAWN = "approval_withdrawn"
+    APPROVAL_ESCALATED = "approval_escalated"
     SYSTEM = "system"
 
 
